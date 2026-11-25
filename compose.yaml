@@ -1,0 +1,176 @@
+# Compose v2 stack for the PDF-processing app. No `version:` key (obsolete in Compose v2).
+#
+# Networking: every published port binds to 127.0.0.1, so Redis and LocalStack S3 are
+# reachable from this host only — never from the LAN. Inside the Compose network the
+# services address each other as redis:6379, localstack:4566 and api:8000.
+#
+# One image (Dockerfile at the repo root) feeds both api and worker; the worker differs
+# only by its command.
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    # Append-only file with a 1-second fsync: the job state survives a Redis restart.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+    # No ports: Redis is internal to the Compose network.
+
+  localstack:
+    image: localstack/localstack:3.8
+    environment:
+      SERVICES: s3
+      DEFAULT_REGION: us-east-1
+      # Load S3 eagerly instead of on first call; avoids cold-start flakiness.
+      EAGER_SERVICE_LOADING: "1"
+      # No S3_BUCKET here: LocalStack does not create buckets, Terraform does.
+    ports:
+      # S3 API for host-side tools/tests only; loopback-bound on purpose.
+      # LOCALSTACK_PORT is overridable because a developer machine may already have
+      # something on 4566; inside the Compose network the address is always
+      # localstack:4566, which is what the app uses.
+      - "127.0.0.1:${LOCALSTACK_PORT:-4566}:4566"
+    volumes:
+      - localstack-data:/var/lib/localstack
+      # The bucket is created by Terraform (the `provisioner` service below), not by an init
+      # hook and not by LocalStack itself — one mechanism, so there is nothing to drift.
+    healthcheck:
+      # Probe with the python interpreter the image already ships; do not rely on curl
+      # being present in any image variant.
+      test:
+        - CMD-SHELL
+        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:4566/_localstack/health', timeout=3)"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+
+  provisioner:
+    # Infrastructure as code, executed without installing Terraform on the host. This is a
+    # one-shot service: `docker compose up` applies the local environment against LocalStack
+    # first, and the API/worker wait for it to exit successfully.
+    #
+    # `terraform apply` refreshes state before planning, so a wiped LocalStack volume is detected
+    # and the bucket is re-created automatically — the failure mode an imperative init hook hides.
+    image: hashicorp/terraform:1.9
+    working_dir: /tf/envs/local
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        terraform init -input=false -backend=false &&
+        terraform apply -auto-approve -input=false &&
+        terraform output -raw bucket_name
+    volumes:
+      - ./infra:/tf
+    environment:
+      TF_IN_AUTOMATION: "1"
+      TF_CLI_ARGS: "-no-color"
+      # Terraform must provision exactly the bucket the application expects. Without this,
+      # setting S3_BUCKET=my-bucket leaves Terraform managing "documents" while the app asks for
+      # "my-bucket", and readiness fails with a 404. One variable feeds both sides.
+      TF_VAR_bucket_name: ${S3_BUCKET:-documents}
+    depends_on:
+      localstack:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    # `required: false` (Compose spec): the app defaults already target the Compose
+    # network, so a missing .env must not abort `docker compose up`.
+    env_file:
+      - path: .env
+        required: false
+    # Optional passthrough, so a reviewer can supply a key without editing any file:
+    #   GEMINI_API_KEY=... AI_MODE=live docker compose up -d --build
+    # Bare-name entries only forward a variable that exists in the shell; when it does not,
+    # Compose omits it and the value from .env / env_file still applies.
+    environment:
+      - GEMINI_API_KEY
+      - GEMINI_MODEL
+      - AI_MODE
+      - S3_BUCKET
+    depends_on:
+      redis:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      provisioner:
+        condition: service_completed_successfully
+    healthcheck:
+      # Liveness, not readiness. /health/live answers "is this process serving HTTP".
+      # /health/ready deliberately returns 503 when Redis/S3 are down or, in live mode,
+      # when no Gemini key is configured — that is a *work-availability* signal for the
+      # reviewer, not a reason for Docker to restart a process that is fine.
+      # (No curl in the slim image: probe interpreter-side.)
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  worker:
+    # Same Dockerfile and same image as api; only the entrypoint differs.
+    build: .
+    command: ["python", "-m", "app.worker"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - GEMINI_API_KEY
+      - GEMINI_MODEL
+      - AI_MODE
+      - S3_BUCKET
+      # Throughput knob: jobs processed in parallel by this one worker process.
+      - WORKER_CONCURRENCY
+      - WORKER_BATCH_SIZE
+    depends_on:
+      redis:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      provisioner:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    # No ports and no healthcheck: it exposes nothing and reports liveness through logs.
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "127.0.0.1:3000:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  test:
+    # `docker compose --profile test run --rm test`
+    # Unit tests only (offline); no port, no dependency on the running stack.
+    profiles: ["test"]
+    build:
+      context: .
+      args:
+        # requirements-dev.txt (pytest) is installed only into this profile's image.
+        # The api/worker production image stays free of test dependencies.
+        INSTALL_DEV: "1"
+    command: ["python", "-m", "pytest", "-q", "-m", "not integration"]
+    volumes:
+      - ./tests:/app/tests:ro
+      # pytest's markers/testpaths live here; the production image does not carry it.
+      - ./pyproject.toml:/app/pyproject.toml:ro
+
+volumes:
+  redis-data:
+  localstack-data:

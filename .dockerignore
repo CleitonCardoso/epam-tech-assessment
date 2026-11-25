@@ -1,0 +1,39 @@
+# Build context hygiene. The image only needs requirements*.txt and app/; everything
+# else would just bloat the context or risk leaking local state into the image.
+
+# VCS / editor
+.git
+.gitignore
+.vscode
+.idea
+
+# Python virtualenvs and caches
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.tmp
+
+# Frontend is built by its own Dockerfile from ./frontend
+frontend
+node_modules
+
+# Tests, samples, scripts, docs and prose are not runtime dependencies
+tests
+samples
+scripts
+docs
+*.md
+*.log
+
+# Infrastructure as code is not needed inside the image, and infra/**/.terraform can hold a
+# few hundred MB of providers - it would dominate the build context.
+infra
+
+# Local secrets / env files are never baked into the image
+.env
+.env.*

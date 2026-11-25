@@ -1,0 +1,76 @@
+# Production topology for a single host.
+#
+#   docker compose -f compose.prod.yaml up -d --build
+#
+# Differences from compose.yaml (local development):
+#   - NO LocalStack and NO Terraform provisioner. On the host, S3 is real AWS and the app
+#     authenticates through the EC2 instance role, so there is no local AWS to emulate and no
+#     bucket for Terraform to create (infra/envs/prod provisions it before the host exists).
+#     Using the dev file here would start an in-host LocalStack and apply the LOCAL Terraform
+#     environment against it: harmless for the app, but pointless work and a misleading log.
+#   - The frontend (nginx) publishes port 80 and is the only entry point; the API is internal.
+#     TLS terminates in front of it: ALB + ACM, or nginx + Let's Encrypt on the box.
+#
+# .env on this host must set, in addition to the usual values:
+#   S3_BUCKET=<bucket from terraform output>
+#   AWS_REGION=<region>
+#   S3_ENDPOINT_URL=          (empty: empty means "real AWS", not LocalStack)
+#   AI_MODE=live
+#   GEMINI_API_KEY=<key>
+
+name: async-pdf-prod
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build: .
+    # Required here: production must not silently fall back to dev defaults.
+    env_file:
+      - path: .env
+        required: true
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["python", "-m", "app.worker"]
+    env_file:
+      - path: .env
+        required: true
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "80:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redis-data:

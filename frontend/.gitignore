@@ -1,0 +1,9 @@
+# Frontend build and dependency artifacts. Kept local to this directory as well, so the
+# folder is self-contained if it is ever extracted or moved on its own.
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+*.local
+npm-debug.log*
+*.log

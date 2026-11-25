@@ -1,0 +1,33 @@
+# Keep line endings stable across platforms.
+#
+# This matters more than usual here: scripts/*.sh must be LF-only. A CRLF shebang fails on Linux
+# with "bad interpreter: /bin/bash^M", and because these scripts run unattended inside containers
+# the failure is silent rather than loud. (The LocalStack init hook that used to live under
+# infra/localstack/ was removed when Terraform took over provisioning; the rule stands for the
+# shell scripts that remain.)
+#
+# Normalize every text file to LF on checkout; Windows users keep LF inside the repo.
+* text=auto eol=lf
+
+# Scripts and configs that must never gain CR.
+*.sh     text eol=lf
+*.bash   text eol=lf
+*.py     text eol=lf
+*.conf   text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.json   text eol=lf
+*.md     text eol=lf
+Dockerfile      text eol=lf
+.dockerignore   text eol=lf
+.env.example    text eol=lf
+
+# Never touch these.
+*.pdf  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.woff binary
+*.woff2 binary
+*.zip  binary

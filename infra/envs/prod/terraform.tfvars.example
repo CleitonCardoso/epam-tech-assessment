@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars and edit. Never commit terraform.tfvars.
+#
+# Bucket names are globally unique across all of AWS: if this one is taken you will get
+# BucketAlreadyExists, so make it specific to you.
+
+project     = "async-pdf"
+environment = "prod"
+aws_region  = "us-east-1"
+
+bucket_name = "CHANGE-ME-async-pdf-uploads"
+
+instance_type  = "t3.small"
+root_volume_gb = 30
+
+# SSH closed by default. To get a shell, set your own address, e.g. ["203.0.113.10/32"].
+key_name        = null
+ssh_cidr_blocks = []

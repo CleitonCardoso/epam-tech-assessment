@@ -1,0 +1,13 @@
+# Runtime dependencies. Bounds are deliberate: the image is verified with `docker compose build`
+# and the resolved versions are then frozen in docs/PROGRESS.md ("dependency freeze") so a
+# reviewer gets the same tree we tested. Raise a bound only with a fresh verified build.
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+pydantic>=2.7,<3
+pydantic-settings>=2.3,<3
+redis>=5.0,<7
+boto3>=1.34,<2
+pypdf>=4.2,<7
+google-genai>=1.0,<2
+openai>=1.40,<3
+python-multipart>=0.0.9,<1

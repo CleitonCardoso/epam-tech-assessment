@@ -1,0 +1,20 @@
+[project]
+name = "async-pdf-processing"
+version = "1.0.0"
+description = "Async PDF processing: upload PDFs, extract per-page content, summarize with Gemini"
+requires-python = ">=3.12"
+
+# Dependencies live in requirements.txt (runtime) and requirements-dev.txt (tests) so the
+# Docker image and a reviewer's shell resolve the exact same set. This file carries tooling
+# configuration only — keeping a second dependency source would let them drift.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "integration: requires running Redis and LocalStack (docker compose up redis localstack)",
+    "e2e: end-to-end through the nginx frontend (docker compose up frontend)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:botocore.*",
+]
