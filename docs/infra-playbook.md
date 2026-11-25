@@ -1,7 +1,7 @@
 > **Status: background research from an unrelated earlier project - not documentation for this
 > application, but now relevant to its `infra/` layer.**
 >
-> This file was produced for `previous-project` (Spring Boot + Vue, Terraform + LocalStack + Docker). It
+> This file was produced for a previous project (Spring Boot + Vue, Terraform + LocalStack + Docker). It
 > is kept because the Terraform/local-infrastructure layer of this repository deliberately follows
 > several of its lessons: the LocalStack lifecycle-configuration trap and the `enable_lifecycle`
 > switch, a committed provider lock file, `fmt -check` + `validate` per environment, and one module
@@ -16,10 +16,11 @@
 
 # Infrastructure playbook — Terraform + Docker + LocalStack
 
-Distilled from the `previous-project` project (Spring Boot + Vue monolith, Terraform + LocalStack + Docker in
+Distilled from a previous project (Spring Boot + Vue monolith, Terraform + LocalStack + Docker in
 dev, one EC2 host in production). Every item below is either a pattern that worked there or a bug that
-cost that project real time. Source files are in `../../previous-project/poolmarket/` when you want the
-original.
+cost that project real time. That project's source is not part of this repository; the patterns it
+teaches are applied here under `infra/` and `compose.yaml`, which is where to look when you want the
+working version.
 
 Scope: how to stand up a local stack, how to structure Terraform, how to shape a compose file, and
 which failures are guaranteed if you skip a step.
@@ -390,27 +391,27 @@ The table worth pasting into the next project's `CLAUDE.md` on day one.
 
 ---
 
-## 9. Where to look in `previous-project`
+## 9. Where these patterns live in this repository
 
-| What | File |
+The source project this playbook was distilled from is not part of this repository. The working
+versions of the patterns are here:
+
+| What the playbook describes | Where it is implemented |
 |---|---|
-| Local provider + env composition | [infra/envs/local/main.tf](../../previous-project/poolmarket/infra/envs/local/main.tf) |
-| Dead module still present | [infra/modules/ssm/main.tf](../../previous-project/poolmarket/infra/modules/ssm/main.tf) |
-| S3 module incl. the lifecycle `count` + `moved` | [infra/modules/s3/main.tf](../../previous-project/poolmarket/infra/modules/s3/main.tf) |
-| Cross-variable preconditions | [infra/envs/prod/checks.tf](../../previous-project/poolmarket/infra/envs/prod/checks.tf) |
-| Remote state bootstrap | [infra/bootstrap/main.tf](../../previous-project/poolmarket/infra/bootstrap/main.tf) |
-| Dev compose (two services) | [docker-compose.yml](../../previous-project/poolmarket/docker-compose.yml) |
-| Prod compose (digests, caps, cron) | [docker-compose.prod.yml](../../previous-project/poolmarket/docker-compose.prod.yml) |
-| SES re-seed hook | [localstack/init/ready.d/10-ses-sender.sh](../../previous-project/poolmarket/localstack/init/ready.d/10-ses-sender.sh) |
-| Compose wrapper | [scripts/compose.sh](../../previous-project/poolmarket/scripts/compose.sh) |
-| Production rehearsal | [scripts/prod-rehearsal.sh](../../previous-project/poolmarket/scripts/prod-rehearsal.sh) |
-| Terraform CI job | [.github/workflows/ci.yml](../../previous-project/poolmarket/.github/workflows/ci.yml) |
-| Architecture + module map | [docs/infrastructure.md](../../previous-project/poolmarket/docs/infrastructure.md) |
-| Day-one runbook + known issues | [.claude/skills/run-previous-project/SKILL.md](../../previous-project/poolmarket/.claude/skills/run-previous-project/SKILL.md) |
-| Symptom → fix table | [docs/development.md](../../previous-project/poolmarket/docs/development.md) |
+| Local provider + environment composition | [infra/envs/local/main.tf](../infra/envs/local/main.tf) |
+| One module shared by local and production | [infra/modules/s3/main.tf](../infra/modules/s3/main.tf), [infra/modules/ec2-app/main.tf](../infra/modules/ec2-app/main.tf) |
+| S3 module with the lifecycle `count` + `moved` | [infra/modules/s3/main.tf](../infra/modules/s3/main.tf) |
+| Production environment and its tfvars example | [infra/envs/prod/main.tf](../infra/envs/prod/main.tf), [infra/envs/prod/terraform.tfvars.example](../infra/envs/prod/terraform.tfvars.example) |
+| Committed provider lock files | `infra/envs/*/.terraform.lock.hcl` |
+| Dev compose | [compose.yaml](../compose.yaml) |
+| Prod compose (no LocalStack, no provisioner) | [compose.prod.yaml](../compose.prod.yaml) |
+| Fault injection and production rehearsal | [scripts/resilience.sh](../scripts/resilience.sh), [scripts/stress.py](../scripts/stress.py) |
+| Terraform CI job | [.github/workflows/ci.yml](../.github/workflows/ci.yml) |
+| Architecture and module map | [docs/ARCHITECTURE.md](ARCHITECTURE.md) |
+| Day-one runbook and the symptom → fix table | [docs/RUNBOOK.md](RUNBOOK.md) |
 
-One deviation worth not copying: that project gitignores `infra/**/.terraform.lock.hcl`. The lock file
-should normally be **committed** — it is what pins provider versions across machines and CI.
+The Terraform lock files **are** committed here, which is the one deviation this playbook flags as
+worth keeping: they pin provider versions across machines and CI.
 
 ---
 

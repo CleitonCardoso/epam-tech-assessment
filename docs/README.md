@@ -83,7 +83,7 @@ every other document quotes for throughput, latency and fault-tolerance numbers.
 
 [infra-playbook.md](infra-playbook.md) is **not authoritative documentation for this
 application**: it is background research distilled from a different, earlier project
-(`previous-project`: Spring Boot + Vue, Terraform + LocalStack + Docker). It is now directly relevant to
+(a Spring Boot + Vue app with Terraform + LocalStack + Docker). It is now directly relevant to
 the `infra/` Terraform layer - several of its lessons are deliberately followed here, including the
 `enable_lifecycle` flag for LocalStack's lifecycle-configuration trap, a committed
 `.terraform.lock.hcl`, committed `terraform.tfvars.example`, `fmt -check` + `validate` per env, and

@@ -25,7 +25,7 @@ limitation in the README, not a silent gap.
 | Explicit `live` / `fake` AI modes, never a silent fallback | I have no Gemini key. Without this, every demo would be a lie. The mode is visible in `/api/v1/parsers`, `/health/ready`, worker logs and README. |
 | Per-page Gemini calls with deterministic page attribution | A whole-document call cannot be trusted to report page boundaries. Reliability of the *output* beats call efficiency here. |
 | `PermanentError` vs `TransientError` on every provider failure | Turns "bounded retry" from a wish into ~15 lines of worker code. |
-| Idempotent LocalStack bucket init on every container start | Direct lesson from the `previous-project` project: LocalStack persists nothing and Terraform cannot detect it, so init must run at boot, not "once". |
+| Idempotent LocalStack bucket init on every container start | Direct lesson from a previous project: LocalStack persists nothing and Terraform cannot detect it, so init must run at boot, not "once". |
 | Bounded reads, PDF signature check, explicit limits | Cheap, and the difference between a demo and a liability. |
 | `GET /api/v1/parsers` | Lets the UI avoid advertising a provider that cannot work. |
 | Honest `503`/`422`/`413` semantics | Nothing is accepted that cannot be processed. |
