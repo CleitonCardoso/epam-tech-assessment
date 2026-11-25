@@ -387,7 +387,7 @@ The table worth pasting into the next project's `CLAUDE.md` on day one.
 | `pkill -f spring-boot:run` leaves the app running | It matches the Maven wrapper, not the child JVM holding the port | Find the PID by port: `Get-NetTCPConnection -LocalPort 8080 -State Listen`, then `Stop-Process` |
 | "I fixed it but the old behaviour persists" | A days-old JVM is still bound to the port; the new one failed to bind silently | Check the PID's `StartTime`; kill by port; `clean compile` |
 | `lsof`, `python3` missing | Not installed | Use `Get-NetTCPConnection`, `node -e`, or plain `curl` |
-| Recursive directory listings hang | OneDrive-synced workspace + build caches | Exclude `.build-cache`, `node_modules`, `.git`, `.terraform`; list shallow first |
+| Recursive directory listings hang | File-synced workspace + build caches | Exclude `.build-cache`, `node_modules`, `.git`, `.terraform`; list shallow first |
 
 ---
 

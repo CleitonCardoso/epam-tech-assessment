@@ -163,7 +163,7 @@ docker compose run -d --name paced --no-deps -e PROVIDER_MAX_REQUESTS_PER_MINUTE
 `scripts/stress.py` exits non-zero if any upload is not 202, any 5xx occurs, or any document fails
 to reach a terminal state inside `--poll-timeout`, so it is usable as a gate rather than a report.
 
-## 8. Real-world corpus (10 documents from a personal Downloads folder)
+## 8. Real-world corpus (10 documents from a personal document folder)
 
 Synthetic fixtures prove the plumbing; these prove it against documents nobody designed for it:
 invoices, contracts, lecture slide decks, a book extract, tax statements and a scanned power of

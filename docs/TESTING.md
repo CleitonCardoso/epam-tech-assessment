@@ -60,7 +60,7 @@ docker run --rm --network none `
 
 Observed: **44 passed, 42 deselected in 2.01 s** (42 = 16 API + 14 repository + 8 e2e + 3
 concurrency + 1 live). Mounting `app/` and `tests/` was deliberate: the built image can be older
-than the working tree (OneDrive build-context caveat), and a unit run should test the code you are
+than the working tree (file-synced build-context caveat), and a unit run should test the code you are
 looking at.
 
 The host has `py -3` = Python 3.14.0b2 with **no pytest installed**, so `py -3 -m pytest tests/unit`

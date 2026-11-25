@@ -179,13 +179,13 @@ runs a one-shot `provisioner` service (the official Terraform image) before api/
 downloads the AWS provider (a minute or two) and needs network, in exchange for infrastructure that
 is declared rather than assumed.
 
-### Environment caveat: stale Docker build context on OneDrive
+### Environment caveat: stale Docker build context on a file-synced directory
 `docker compose build` from this project directory kept producing an image with an **older**
 `app/providers/gemini.py`, even with `--no-cache`, while the file on disk and a bind mount both
-showed the new content. Building the same tree from a temp directory outside OneDrive produced the
-correct image (`grep -c HttpRetryOptions` → 1 vs 0). So it is BuildKit snapshotting a stale context
-for the OneDrive-backed path, not a defect in the repo: a fresh clone builds correctly. Workaround
-used for verification: build from a temp context, then retag the resulting image.
+showed the new content. Building the same tree from a temp directory outside the synced tree produced
+the correct image (`grep -c HttpRetryOptions` → 1 vs 0). So it is BuildKit snapshotting a stale
+context for the file-synced path, not a defect in the repo: a fresh clone builds correctly.
+Workaround used for verification: build from a temp context, then retag the resulting image.
 
 ## Environment facts for whoever runs this next
 
