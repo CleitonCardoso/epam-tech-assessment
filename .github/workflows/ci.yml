@@ -30,23 +30,44 @@ jobs:
         run: docker build --build-arg INSTALL_DEV=1 -t app-test .
 
       - name: ruff (lint)
-        run: docker run --rm -v "$PWD:/src" -w /src app-test ruff check .
+        # `docker run` does not inherit the step environment, so the cache dir is passed explicitly.
+        # Without it ruff tries to write /src/.ruff_cache, which uid 10001 cannot create in the
+        # runner's checkout.
+        run: docker run --rm -e RUFF_CACHE_DIR=/tmp/ruff-cache -v "$PWD:/src" -w /src app-test ruff check .
 
       - name: ruff (format)
-        run: docker run --rm -v "$PWD:/src" -w /src app-test ruff format --check .
+        run: docker run --rm -e RUFF_CACHE_DIR=/tmp/ruff-cache -v "$PWD:/src" -w /src app-test ruff format --check .
 
       - name: mypy
         run: docker run --rm -v "$PWD:/src:ro" -w /src app-test mypy --cache-dir=/tmp/mypy
 
+      - name: no local env files or editor leftovers tracked
+        run: |
+          # `.gitignore` already ignores them; this fails if one is ever force-added. A stale
+          # `.env.bak` with a live key once reached a packaged artifact, so the rule is explicit.
+          bad=$(git ls-files | grep -E '(^|/)\.env($|\.)|\.(bak|orig|rej|swp)$' | grep -v '^\.env\.example$' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::local env/backup files are tracked:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "no local env or backup files tracked"
+
       - name: no secrets committed
         run: |
-          if grep -rEn 'AIza[0-9A-Za-z_-]{35}|sk-[A-Za-z0-9]{20,}' \
-             --include='*.py' --include='*.md' --include='*.yaml' --include='*.yml' \
-             --include='*.toml' --include='*.txt' --include='*.sh' --exclude-dir=.git . ; then
+          # `git grep` scans every *tracked* file regardless of extension, which is the surface that
+          # actually reaches the public repo. Patterns are credential shapes, not words.
+          patterns='AIza[0-9A-Za-z_-]{35}|sk-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|xox[baprs]-[A-Za-z0-9-]{10,}'
+          if git grep -InE "$patterns" -- . ':!*.lock'; then
             echo "::error::a credential-shaped string is committed"
             exit 1
           fi
-          echo "no credential-shaped strings found"
+          # Also look for a key that was rotated out but left in history.
+          if git log -p --all --no-color 2>/dev/null | grep -qE 'AIza[0-9A-Za-z_-]{35}|sk-[A-Za-z0-9]{20,}'; then
+            echo "::error::a credential-shaped string exists in git history"
+            exit 1
+          fi
+          echo "no credential-shaped strings in the tree or history"
 
       - name: UTF-8 encoding gate
         run: docker run --rm -v "$PWD:/src:ro" -w /src app-test python scripts/check_encoding.py

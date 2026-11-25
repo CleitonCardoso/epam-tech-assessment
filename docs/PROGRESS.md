@@ -294,3 +294,20 @@ Final verification tally (all executed, nothing inferred):
 | live provider (opt-in) | 1 passed |
 | terraform fmt + validate | clean, both environments |
 | smoke.sh | passed |
+
+### CI is not decoration: the first two runs found bugs local runs could not
+
+The workflow was written and tested locally, then pushed — and failed twice for reasons that only
+exist in a real runner:
+
+21. **ruff could not create its cache.** The image runs as uid 10001, the runner's checkout belongs
+    to uid 1000, so `/src/.ruff_cache` was unwritable ("Permission denied", exit 2). Local Windows
+    bind mounts are world-writable, which is exactly why this never reproduced here. Fixed by
+    passing `-e RUFF_CACHE_DIR=/tmp/ruff-cache` to `docker run` — and the first attempt still failed,
+    because `docker run` does not inherit the step environment; the env var has to be passed
+    explicitly, which is now a comment in the workflow.
+22. **A duplicate `ruff (lint)` step** was left behind while fixing 21. Harmless at runtime, sloppy
+    in review; removed after listing the parsed steps from the YAML rather than eyeballing it.
+
+Both are recorded because "the pipeline passes" is a claim that should come with the story of what it
+caught, not just a green check.
