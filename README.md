@@ -1,4 +1,6 @@
-﻿# Async PDF processing
+# Async PDF processing
+
+[![CI](https://github.com/CleitonCardoso/epam-tech-assessment/actions/workflows/ci.yml/badge.svg)](https://github.com/CleitonCardoso/epam-tech-assessment/actions/workflows/ci.yml)
 
 Upload one or more PDFs, pick a parser, and read **ordered per-page content** plus **one
 document-level summary** once a background worker finishes. The HTTP API never blocks on
