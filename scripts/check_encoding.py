@@ -5,9 +5,13 @@ This exists because two separate encoding accidents reached the repository:
 1. a Windows-1252 em dash (0x97) made files invalid UTF-8, which broke `mypy` with
    "cannot decode file" and renders as garbage in editors;
 2. UTF-8 bytes decoded as cp1252 and re-encoded, so "—" became "â€”" — *valid* UTF-8, invisible to a
-   validity check, and it silently degraded 127 characters across three documents.
+   validity check. It hit em dashes and ellipses first, then box-drawing characters (─ → "â”€",
+   ┌ → "â”Œ", ┤ → "â”¤"), and finally a section sign (Â§G1) — each time a new variant that a
+   fixed list of sequences missed.
 
-Both are cheap to detect and expensive to notice in review.
+The detector therefore does not list sequences: it matches the *signature* of the accident — a
+Latin-1 lead byte (À-ï) immediately followed by a cp1252 punctuation byte. Both are cheap to detect
+and expensive to notice in review.
 
     python scripts/check_encoding.py
 """
@@ -15,6 +19,7 @@ Both are cheap to detect and expensive to notice in review.
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -36,11 +41,19 @@ TEXT_SUFFIXES = {
     ".html",
 }
 SKIP_DIRS = {".git", "node_modules", ".terraform", ".tmp", "dist", "__pycache__", ".pytest_cache"}
-# This file necessarily contains the sequences it looks for, so it cannot scan itself.
+# This file's own docstring uses the mojibake strings as examples, so it cannot scan itself.
 SKIP_FILES = {"scripts/check_encoding.py"}
 
-# UTF-8 read back as cp1252: the tell-tale byte pairs for the characters this repo actually uses.
-DOUBLE_ENCODED = ("â€”", "â€“", "â€¦", "Â·", "â†’", "â€™", "â€œ")  # noqa: RUF001 - literals by design
+# The double-encoding signature: a UTF-8 lead byte mis-decoded as Latin-1 (À-ï = U+00C0-U+00EF),
+# followed by a cp1252 punctuation/continuation byte. This catches every variant in one rule
+# instead of a hand-maintained list: "â€”" (em dash), "Â·" (middot), "â”€" (box-drawing), "Â§"
+# (section sign), "Ã©" (é), and so on.
+_DOUBLE_ENCODED_RE = re.compile(
+    r"[\u00c0-\u00ef]"
+    r"[\u20ac\u201a\u0192\u201e\u2026\u2020\u2021\u02c6\u2030\u0160\u2039\u0152\u017d"
+    r"\u2018\u2019\u201c\u201d\u2022\u2013\u2014\u02dc\u2122\u0161\u203a\u0153\u017e\u0178"
+    r"\u00a0-\u00bf]"
+)
 
 
 def main() -> int:
@@ -63,7 +76,7 @@ def main() -> int:
         except UnicodeDecodeError as exc:
             bad.append((str(path.relative_to(ROOT)), exc.start, exc.reason))
             continue
-        hits = sum(text.count(seq) for seq in DOUBLE_ENCODED)
+        hits = len(_DOUBLE_ENCODED_RE.findall(text))
         if hits:
             mojibake.append((str(path.relative_to(ROOT)), hits))
 

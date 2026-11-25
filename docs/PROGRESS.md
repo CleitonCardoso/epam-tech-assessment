@@ -271,7 +271,7 @@ The self-review scored the project 7/10 and named the gaps. This round closes th
 | No protection of any kind | nginx `limit_req` (20 r/s uploads, 100 r/s api, JSON 429) + `MAX_CONCURRENT_UPLOADS` admission control | burst of 150 hit 64 x 429 with the documented body |
 | No lint/type gate | ruff (E,F,W,I,N,B,UP,SIM,RUF) + format check + mypy over 24 modules | `All checks passed`; `Success: no issues found` |
 | Frontend had no tests | vitest suite + reload recovery via the list endpoint | 29 tests (5 files) passing; `tsc --noEmit` and `npm run build` clean |
-| Mandated model never demonstrated | 10 patient attempts, all `503 UNAVAILABLE`; alias used and documented | `docs/REQUIREMENTS.md` Â§G1 |
+| Mandated model never demonstrated | 10 patient attempts, all `503 UNAVAILABLE`; alias used and documented | `docs/REQUIREMENTS.md` §G1 |
 
 Bugs found while closing the gaps:
 
