@@ -84,30 +84,39 @@ Classes the registry will import, with **exactly these names and constructor sig
 
 ```python
 # app/parsers/pypdf_parser.py
-class PyPdfParser:                     # id = ParserId.PYPDF
+class PyPdfParser:  # id = ParserId.PYPDF
     id = ParserId.PYPDF
+
     async def parse(self, pdf: bytes, *, filename: str, limits: ParseLimits) -> ParseResult: ...
+
 
 # app/parsers/gemini_parser.py
 class GeminiParser:
-    id = ParserId.GEMINI               # output format: markdown
+    id = ParserId.GEMINI  # output format: markdown
+
     def __init__(self, *, api_key: str, model: str, timeout_seconds: float) -> None: ...
     async def parse(self, pdf: bytes, *, filename: str, limits: ParseLimits) -> ParseResult: ...
 
+
 # app/parsers/openai_parser.py       (optional stretch)
 class OpenAIParser:
-    id = ParserId.GPT5_MINI            # output format: markdown
+    id = ParserId.GPT5_MINI  # output format: markdown
+
     def __init__(self, *, api_key: str, model: str, timeout_seconds: float) -> None: ...
     async def parse(self, pdf: bytes, *, filename: str, limits: ParseLimits) -> ParseResult: ...
+
 
 # app/providers/gemini.py
 class GeminiSummarizer:
     def __init__(self, *, api_key: str, model: str, timeout_seconds: float) -> None: ...
     async def summarize(self, pages: list[PageResult], *, timeout_seconds: float) -> str: ...
 
+
 # app/providers/fake.py
 class FakeParser:
     def __init__(self, parser_id: ParserId, *, delay_seconds: float = 0.0) -> None: ...
+
+
 class FakeSummarizer:
     def __init__(self, *, delay_seconds: float = 0.0) -> None: ...
 ```

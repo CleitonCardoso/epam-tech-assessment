@@ -20,7 +20,6 @@ from tests.conftest import (
     JOB_TIMEOUT,
     sample,
     submit,
-    unique_name,
     upload_and_wait,
     wait_for_terminal,
 )
@@ -186,3 +185,50 @@ class TestIdempotentAcceptance:
 
         for document_id in ids:
             assert wait_for_terminal(client, document_id)["status"] == "completed"
+
+
+class TestListing:
+    """The list endpoint is what makes a page refresh survivable."""
+
+    def test_recent_documents_are_listed_newest_first(self, client) -> None:
+        first = upload_and_wait(client, [sample("sample-text.pdf")], "pypdf")
+        second = upload_and_wait(client, [sample("sample-text.pdf")], "pypdf")
+
+        response = client.get("/api/v1/documents", params={"limit": 100})
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert "documents" in payload
+
+        ids = [entry["id"] for entry in payload["documents"]]
+        assert first["id"] in ids and second["id"] in ids
+        # Newest first: the second upload must not appear after the first.
+        assert ids.index(second["id"]) < ids.index(first["id"])
+
+        entry = payload["documents"][ids.index(second["id"])]
+        assert entry["status"] == "completed"
+        assert entry["page_count"] >= 2
+        assert entry["status_url"] == f"/api/v1/documents/{second['id']}"
+        assert {"id", "filename", "parser", "status", "created_at"} <= set(entry)
+
+    def test_pagination_cursor_walks_backwards_without_repeating(self, client) -> None:
+        ids = [
+            upload_and_wait(client, [sample("sample-text.pdf")], "pypdf")["id"] for _ in range(3)
+        ]
+
+        page = client.get("/api/v1/documents", params={"limit": 2}).json()
+        assert len(page["documents"]) <= 2
+        assert page["next_before"] is not None, "a full page must offer a cursor"
+
+        older = client.get(
+            "/api/v1/documents", params={"limit": 100, "before": page["next_before"]}
+        )
+        assert older.status_code == 200, older.text
+        older_ids = {entry["id"] for entry in older.json()["documents"]}
+
+        first_page_ids = {entry["id"] for entry in page["documents"]}
+        assert not (first_page_ids & older_ids), "pagination must not repeat documents"
+        assert any(document_id in older_ids for document_id in ids)
+
+    def test_limit_is_bounded(self, client) -> None:
+        assert client.get("/api/v1/documents", params={"limit": 0}).status_code == 422
+        assert client.get("/api/v1/documents", params={"limit": 101}).status_code == 422

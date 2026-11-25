@@ -4,10 +4,11 @@ How the async PDF-processing application is put together: processes, the request
 state machine, the Redis and S3 layouts, and the reliability mechanisms that make a killed worker
 recoverable without double-committing a result.
 
-Sources for every claim here: `app/`, `compose.yaml`, `infra/`, `frontend/nginx.conf`, and the
-verification ledger in [PROGRESS.md](PROGRESS.md). Where something was checked by running it in
-this environment, it is marked **verified**. Throughput, latency and fault-injection numbers are
-quoted from the measured report [PERFORMANCE.md](PERFORMANCE.md), not re-derived here.
+Sources for every claim here: `app/`, `compose.yaml`, `infra/`, `frontend/nginx.conf`, the test
+suites under `tests/`, `.github/workflows/ci.yml`, and the verification ledger in
+[PROGRESS.md](PROGRESS.md). Where something was checked by running it in this environment, it is
+marked **verified**. Throughput, latency and fault-injection numbers are quoted from the measured
+report [PERFORMANCE.md](PERFORMANCE.md), not re-derived here.
 
 ## 1. Infrastructure provisioning and components
 
@@ -105,16 +106,18 @@ not been deployed - there is no AWS account here.
 | Component | What it is | Responsibility | Explicitly never does |
 |---|---|---|---|
 | `provisioner` | `hashicorp/terraform:1.9`, one-shot | `terraform init` + `apply` the local environment against LocalStack, then exit; api/worker gate on its exit status | Serve traffic, stay running |
-| `api` | FastAPI app under uvicorn (`app.main:app`) | Validate upload, store the source object in S3, write the job hash and stream entry atomically, serve status/parsers/health | Parse a PDF, call a model, block on work |
-| `worker` | Same image, different command (`python -m app.worker`) | Consume the stream with bounded concurrency, hold a per-job lease, parse, checkpoint pages, summarize, commit terminal state, drain on SIGTERM | Serve HTTP |
-| `redis` | Redis 7.4 with AOF (`--appendonly yes --appendfsync everysec`) | Authoritative job state and the queue (Streams) | Store PDF bytes |
+| `api` | FastAPI app under uvicorn (`app.main:app`) | Validate upload, admission-control and store the source, write the job hash + stream entry + list index atomically, serve status/list/parsers/health | Parse a PDF, call a model, block on work |
+| `worker` | Same image, different command (`python -m app.worker`) | Consume the stream with bounded concurrency, hold a per-job lease, parse (PyPDF, Gemini or GPT-5 Mini), checkpoint pages, summarize, commit terminal state, drain on SIGTERM | Serve HTTP |
+| `redis` | Redis 7.4 with AOF (`--appendonly yes --appendfsync everysec`) | Authoritative job state, the queue (Streams) and the recent-documents index (sorted set) | Store PDF bytes |
 | `localstack` | LocalStack 3.8, `SERVICES=s3` | The S3 API the app and Terraform talk to; it owns no bucket itself - Terraform creates that | Persist anything across recreation (community edition) |
-| `frontend` | React + Vite build served by nginx | Static UI, same-origin `/api` and `/health` reverse proxy | Business logic |
-| nginx | Inside the `frontend` image | Proxy `/api/` and `/health/` to `api:8000`, SPA fallback, 25 MB body cap | Parse, retry, transform |
+| `frontend` | React + Vite build served by nginx | Static UI, same-origin `/api` and `/health` reverse proxy, per-IP request-rate limits | Business logic |
+| nginx | Inside the `frontend` image | Proxy `/api/` and `/health/` to `api:8000`, SPA fallback, 25 MB body cap, two `limit_req` zones (http context) that answer `429` JSON | Parse, retry, transform |
 
 The API and worker share one Dockerfile and the same code (`app/config.py`, `app/models.py`,
 `app/storage/*`, `app/registry.py`). The API never imports the worker loop. Redis is the only job
-state; S3 holds sources only.
+state; S3 holds sources only. Both the OpenAI and Gemini SDK surfaces are confined to
+`app/providers/`; the parsers share a page splitter (`app/parsers/pdf_pages.py`) and the provider
+clients share a pacer (`app/providers/pacing.py`).
 
 Ports are loopback-bound on the host (verified with `docker compose ps`):
 
@@ -135,14 +138,21 @@ browser (React :3000)
   | same-origin fetch: /api/v1/...
   v
 nginx (frontend container :80) -- /api/ and /health/ --> api:8000
+  |   limit_req: 20 r/s per IP on /api/v1/documents (uploads+list),
+  |              100 r/s per IP on the rest of /api/; JSON 429 on excess
   |
   |  POST /api/v1/documents  (multipart: parser + repeated files)
   v
 api (FastAPI :8000)
+  |-- admission: wait up to 10 s for one of MAX_CONCURRENT_UPLOADS slots (else 503 + Retry-After)
   |-- validate: parser known + enabled, bounded read, %PDF- signature, limits
   |-- PUT s3://documents/uploads/<uuid>/source.pdf
-  |-- MULTI { HSET docs:job:<uuid> ..., XADD docs:jobs * document_id <uuid> }
+  |-- MULTI { HSET docs:job:<uuid> ..., XADD docs:jobs * document_id <uuid>,
+  |           ZADD docs:index <epoch> <uuid> }   (also prunes the index to the retention window)
   `-- 202 {documents:[...], rejected:[...]}
+
+  GET /api/v1/documents?limit=&before=  -> ZREVRANGEBYSCORE docs:index + HGETALL per id
+                                           -> 200 {documents:[...], next_before}
                                      |
                                      |  Redis Stream docs:jobs (field: document_id only)
                                      v
@@ -151,7 +161,7 @@ api (FastAPI :8000)
                                 |-- dispatch up to WORKER_CONCURRENCY jobs; stop reading when full
                                 |-- per job: SET NX PX docs:lease:<uuid>  (own execution token)
                                 |-- GET s3://documents/uploads/<uuid>/source.pdf
-                                |-- parse (PyPDF in a thread, or Gemini per page)
+                                |-- parse (PyPDF in a thread; Gemini or GPT-5 Mini, one call/page)
                                 |-- SET docs:pages:<uuid> + status=summarizing   (checkpoint)
                                 |-- summarize with Gemini (one call, whole document)
                                 `-- WATCH/MULTI fenced commit:
@@ -159,10 +169,10 @@ api (FastAPI :8000)
                                       XACK + XDEL the stream entry
 ```
 
-The API phase is bounded by upload size (max 20 MB per file), not by parsing time. Parsing and
-model calls happen only in the worker process, so a slow document cannot slow down `/health/live`,
-status reads, or another upload. That property was exercised in the ledger (8 s job in flight:
-health 3.7 ms, status 6.1 ms, second POST 10.7 ms).
+The API phase is bounded by upload size (max 20 MB per file) and by the admission semaphore, not by
+parsing time. Parsing and model calls happen only in the worker process, so a slow document cannot
+slow down `/health/live`, status reads, or another upload. That property was exercised in the ledger
+(8 s job in flight: health 3.7 ms, status 6.1 ms, second POST 10.7 ms).
 
 ## 3. Job lifecycle state machine
 
@@ -236,6 +246,7 @@ frozen in [CONTRACT.md](CONTRACT.md) section 6.
 | `docs:pages:<id>` | String (JSON) | `save_pages` | `EXPIRE` at terminal state (completed and failed) | `{"pages":[{"page_number":1,"format":"text","content":"..."}],"warnings":[...]}` |
 | `docs:summary:<id>` | String | `commit_completed` (`SET ... EX ttl`) | `RESULT_TTL_SECONDS` | The document summary markdown. Gemini-only. |
 | `docs:lease:<id>` | String + TTL | `acquire_lease` (SET NX PX), `renew_lease` (Lua), `release_lease` (Lua DEL) | `LEASE_SECONDS` while held; removed on clean release | Unique execution token (uuid4 hex) for the worker that owns the job |
+| `docs:index` | Sorted set | `create_and_enqueue` (`ZADD score=<enqueue epoch>` + `ZREMRANGEBYSCORE` prune, in the acceptance MULTI) | No per-key TTL; pruned to `RESULT_TTL_SECONDS` on every accepted upload | Member `document_id`, score = enqueue epoch. Backs `GET /api/v1/documents` (newest first, cursor = score). It is an index only: the hash is the source of truth and expired hashes are skipped when paging. |
 
 Consumer group: `document-workers` on `docs:jobs`, created with `MKSTREAM` at id `0` so entries
 already in the stream are consumed. Only `BUSYGROUP` is tolerated as "already created".
@@ -253,6 +264,12 @@ Notes:
 - The job hash is the authoritative record; `docs:pages` and `docs:summary` are the result
   payloads, written through the same lease fence.
 - No PDF bytes ever go into Redis, and stream entries never carry the file or its content.
+- `docs:index` exists only so a page refresh can rebuild the UI (`GET /api/v1/documents`). It has
+  no per-key TTL: it is pruned to `RESULT_TTL_SECONDS` on every accepted upload, and when a job
+  hash has already expired the list simply skips that id. The cursor is the zset **score**
+  (enqueue epoch), so pagination is `ZREVRANGEBYSCORE docs:index (before -inf LIMIT`. The index is
+  written in the same acceptance `MULTI` as the hash and stream entry, so a job can never be
+  visible in the list without being queued.
 
 ## 5. S3 object layout
 
@@ -316,36 +333,54 @@ The cost of the design is stated, not hidden:
 - The design assumes exactly **one** consumer group, which is why `XDEL` after `XACK` is safe; a
   second group would have had the entry deleted out from under it.
 
-## 7. Why Gemini is called once per page, not once per document
+## 7. Parsers: three real implementations, one page per model call
 
-For the `gemini` parser the worker does not send the whole PDF in one request. `_split_pages`
-writes one single-page PDF per source page (PyPDF `PdfWriter`), then makes **one model call per
-page** with the `PAGE_PROMPT` instruction, sequentially.
+There are three parsers, and all three are real implementations:
 
-The reason is correctness of attribution, not cost efficiency: a whole-document call returns one
-blob, and the model decides where page boundaries are. When a document has no visible page breaks,
-that silently mis-attributes content, and the API promises ordered per-page content. Splitting
-first makes `page_number` deterministic: page N's markdown is the result of page N's call.
+| Parser | Implementation | Output | How it extracts |
+|---|---|---|---|
+| `pypdf` | `app/parsers/pypdf_parser.py` | `text` per page | `PdfReader.extract_text()` in a thread; empty pages kept so numbering stays contiguous; no text at all -> `OCR_REQUIRED` |
+| `gemini` | `app/parsers/gemini_parser.py` + `app/providers/gemini.py` | `markdown` per page | Split into single-page PDFs (shared `pdf_pages.split_pdf_pages`), then one `google-genai` call per page, sequential within the document; Gemini-only summary afterwards |
+| `gpt-5-mini` | `app/parsers/openai_parser.py` + `app/providers/openai_adapter.py` | `markdown` per page | Same shared splitter, then one Responses-API call per page with the page sent as an inline PDF (`input_file` with a base64 `data:application/pdf` URL + `input_text`); sequential within the document |
+
+Both AI parsers share `app/parsers/pdf_pages.py` (split/validate/limit) and both provider clients
+share `app/providers/pacing.py` (`ProviderPacer`: semaphore + token bucket) and the
+`TransientError`/`PermanentError` vocabulary, so the worker cannot tell which provider ran. The
+registry is the only place that decides which are enabled and why not (see
+[API.md](API.md#get-apiv1parsers)).
+
+Why split first instead of sending the whole document: correctness of attribution, not cost
+efficiency. A whole-document call returns one blob, and the model decides where page boundaries
+are; when a document has no visible page breaks that silently mis-attributes content, while the API
+promises ordered per-page content. Splitting first makes `page_number` deterministic: page N's
+markdown is the result of page N's call (one request per page, so one page's content cannot bleed
+into another's).
 
 The costs and bounds are explicit:
 
-- N calls for an N-page document, run sequentially to respect free-tier rate limits and to keep
-  ordering trivially correct. Sequential **within** a document; several documents can be in flight
-  at once, bounded by `WORKER_CONCURRENCY` and paced per process (section 10.3).
-- The AI parser is capped by `MAX_AI_PAGES` (default 20) and fails with
-  `TOO_MANY_PAGES_FOR_AI` above it; the page-level text cap is `MAX_EXTRACTED_CHARS`.
+- N calls for an N-page document per AI parser, sequential **within** a document - several
+  documents can be in flight at once, bounded by `WORKER_CONCURRENCY` and paced per client
+  (section 10.3).
+- The AI parsers are capped by `MAX_AI_PAGES` (default 20) by the shared splitter and fail with
+  `TOO_MANY_PAGES_FOR_AI` before any provider call; the page-level text cap is
+  `MAX_EXTRACTED_CHARS`.
 - A page that yields the literal marker `(no extractable text)` is stored as an empty page with a
   warning, keeping page numbers contiguous. If every page is empty, the parser fails with
-  `OCR_REQUIRED`.
-- The **summary is separate and always document-level**: after all pages are extracted and
-  checkpointed, `GeminiSummarizer` is called once with the pages delimited as
-  `[PAGE n] ... [END PAGE n]`, and returns one summary string per document. A failed summary
-  keeps the extracted pages (a `failed` document can still return readable pages).
+  `OCR_REQUIRED`; a PDF with zero pages also raises `OCR_REQUIRED` from the shared splitter.
+- The **summary is separate and always document-level and Gemini-only**, whichever parser extracted
+  the pages: after all pages are checkpointed, `GeminiSummarizer` is called once with the pages
+  delimited as `[PAGE n] ... [END PAGE n]`. A failed summary keeps the extracted pages (a `failed`
+  document can still return readable pages).
+- The GPT-5 Mini path is **implemented but not live-verified**: no OpenAI credential exists here,
+  so its payload, ordering, cap and error mapping are pinned against a stub
+  (`tests/unit/test_openai_parser.py`). The Gemini path has been live-verified.
 
 ## 8. Upload to completed, step by step
 
 ```text
 1. Client POSTs multipart (parser field + repeated files fields) to /api/v1/documents.
+   Admission control runs first: wait up to UPLOAD_SLOT_TIMEOUT_SECONDS (10 s) for one of
+   MAX_CONCURRENT_UPLOADS (16) slots; on timeout -> 503 + Retry-After: 1 (before any validation).
 2. API parses the parser name against ParserId: unknown -> 422; disabled -> 503 (before reading files).
 3. API checks file count <= MAX_BATCH_FILES: else 413.
 4. For each file, in order:
@@ -355,10 +390,11 @@ The costs and bounds are explicit:
    d. empty -> rejected[] EMPTY_FILE; missing %PDF- signature -> rejected[] NOT_A_PDF;
    e. PUT uploads/<new-uuid>/source.pdf in a thread; object-store failure -> rejected[] STORAGE_UNAVAILABLE;
    f. build DocumentJob (status queued, deadline_at = now + 600 s);
-   g. MULTI { HSET docs:job:<id>; XADD docs:jobs * document_id <id> }; on RedisError delete the
-      just-uploaded object and reject with QUEUE_UNAVAILABLE.
+   g. MULTI { HSET docs:job:<id>; XADD docs:jobs * document_id <id>;
+              ZADD docs:index <epoch> <id>; ZREMRANGEBYSCORE docs:index -inf <now - TTL> };
+      on RedisError delete the just-uploaded object and reject with QUEUE_UNAVAILABLE.
 5. Respond 202 {documents, rejected} if at least one file was accepted; else 422 (or 503 when the
-   only failures were storage/queue failures).
+   only failures were storage/queue failures). The admission slot is released after the response.
 6. Worker loop: XREADGROUP (count WORKER_BATCH_SIZE=8, block 2 s); if empty, XAUTOCLAIM stale
    entries (same count). One asyncio task is dispatched per message, bounded by a semaphore of
    WORKER_CONCURRENCY=4; while every slot is busy the loop stops reading (backpressure).
@@ -369,7 +405,8 @@ The costs and bounds are explicit:
 10. Attempt loop: HINCRBY attempt; if > MAX_JOB_ATTEMPTS -> fail ATTEMPTS_EXHAUSTED.
 11. Processor checks deadline_at; expired -> fail DEADLINE_EXCEEDED.
 12. If docs:pages:<id> exists, resume: skip extraction (log job_resumed).
-13. Otherwise: status parsing; GET the source from S3; parse (PyPDF thread, or Gemini per-page calls);
+13. Otherwise: status parsing; GET the source from S3; parse (PyPDF in a thread, or Gemini / GPT-5
+    Mini via the shared page splitter with one model call per page);
     validate pages (1-based, contiguous); save_pages writes docs:pages:<id> JSON, sets
     status=summarizing, page_count and warnings - still fenced by the lease token.
 14. Status summarizing; get the summarizer; one Gemini call over the delimited pages.
@@ -429,9 +466,10 @@ block (2 s) plus the reclaim idle threshold (`LEASE_SECONDS`, 90 s by default) p
   (`asyncio.to_thread`), so CPU-bound parsing stops scaling around the number of cores; the
   measured curve is 4.22 -> 16.32 -> 22.99 settled docs/s at concurrency 1 -> 4 -> 8
   ([PERFORMANCE.md](PERFORMANCE.md)).
-- Backlog is accepted, not shed: the API has no admission control, so uploads keep returning `202`
-  while the queue grows and the worker stays saturated. Memory during the upload phase is bounded
-  by in-flight uploads x `MAX_BATCH_BYTES`, not by the queue.
+- Backlog is accepted, not shed at the queue level: admission bounds how many uploads are buffered
+  at once (16) and the proxy bounds browser request rate, but neither caps queue depth. Uploads keep
+  returning `202` while the queue grows and the worker stays saturated. Memory during the upload
+  phase is bounded by in-flight uploads x `MAX_BATCH_BYTES`, not by the queue.
 
 ### 10.2 Shutdown and draining
 
@@ -445,46 +483,80 @@ block (2 s) plus the reclaim idle threshold (`LEASE_SECONDS`, 90 s by default) p
 
 ### 10.3 Provider pacing
 
-Three layers, all client-side, in `app/providers/gemini.py` plus the worker's retry policy:
+One shared class, `app/providers/pacing.py::ProviderPacer`, is used by every provider client
+(Gemini parser, Gemini summarizer, GPT-5 Mini parser). Each client instance owns its own pacer:
 
-1. `PROVIDER_MAX_CONCURRENCY` (default 4) - a semaphore around each provider request, per process.
+1. `PROVIDER_MAX_CONCURRENCY` (default 4) - a semaphore around each provider request.
 2. `PROVIDER_MAX_REQUESTS_PER_MINUTE` (default 0 = disabled) - a continuously refilled token
    bucket; calls wait before reaching the provider instead of discovering the limit as a 429.
 3. `Retry-After` (clamped by `RETRY_AFTER_MAX_SECONDS`, default 30 s) and jittered backoff - when a
    429/503 does arrive, the worker honours the provider's delay within that cap and adds jitter so
-   parallel jobs do not retry in lockstep.
+   parallel jobs do not retry in lockstep. Both adapters parse the header (`gemini.py` and
+   `openai_adapter.py`).
 
-The pacing state is per process: N worker processes multiply the effective request rate, which is
-why `PROVIDER_MAX_REQUESTS_PER_MINUTE` must come from the provider's published limit (divide it
-across processes if you ever run more than one). Measured effect: a 20-document live burst with no
-pacing failed documents with `PROVIDER_ERROR` after 429/503 responses exhausted the retry budget;
-paced at 20 RPM it completed 20/20 (0.76 docs/s, almost exactly 20 RPM / 3 calls per document).
-Tuning rule: `throughput ~= RPM / calls_per_document`. Details and caveats:
-[PERFORMANCE.md](PERFORMANCE.md).
+Pacing is **per client instance, not per process**. In a live Gemini configuration the worker holds
+two Gemini clients (the Gemini parser and the Gemini summarizer, when that parser is selected) and
+one OpenAI client, each with its own semaphore and bucket; if `PROVIDER_MAX_REQUESTS_PER_MINUTE` is
+set, the effective request rate can be a small multiple of that number depending on which clients
+are active. Set the RPM from the provider's published limit and leave headroom for the summarizer.
+Multiple worker processes multiply it again.
+
+Measured effect on the Gemini path: a 20-document live burst with no pacing failed documents with
+`PROVIDER_ERROR` after 429/503 responses exhausted the retry budget; paced at 20 RPM it completed
+20/20 (0.76 docs/s, almost exactly 20 RPM / 3 calls per document). Tuning rule:
+`throughput ~= RPM / calls_per_document`. Details and caveats: [PERFORMANCE.md](PERFORMANCE.md).
+
+### 10.4 Admission control and proxy rate limiting
+
+Two protective layers sit in front of the expensive path. Neither is authentication; both are
+blast-radius controls.
+
+- **Admission control (application, always on).** Uploads buffer the whole file in memory before the
+  S3 write, so the API holds a semaphore of `MAX_CONCURRENT_UPLOADS` (default 16). A request waits up
+  to `UPLOAD_SLOT_TIMEOUT_SECONDS` (default 10 s) for a slot and otherwise gets a truthful `503`
+  with `Retry-After: 1` - it is not buffered anyway. The limit is per API process. The list endpoint
+  is not admission-controlled.
+- **Proxy rate limiting (nginx, UI origin only).** `frontend/nginx.conf` declares two
+  `limit_req_zone`s keyed on `$binary_remote_addr` (per client IP): `uploads` at 20 r/s with burst
+  40 on exactly `/api/v1/documents` (both upload and list), and `api` at 100 r/s with burst 200 on
+  the rest of `/api/`. Excess requests get `429` with a JSON body
+  (`{"detail": "...", "code": "RATE_LIMITED"}`) generated by an `error_page` named location.
+  `limit_req_zone` is only legal in the http context, so the directives sit **outside** the `server`
+  block of that file (it is included from `conf.d/`, inside `http {}`); moving them inside `server`
+  makes nginx exit with `"limit_req_zone" directive is not allowed here` and the container
+  crash-loops.
+- The proxy limits do not apply to a direct call on `:8000`; they are a browser-traffic guard, not
+  a security boundary. Per-IP means clients behind one NAT share a bucket, and there are no
+  per-account quotas. Measured: 150 rapid requests from one IP through nginx produced 64 `429`s
+  with the documented body (coordinator-run); a 200-request repeat during this pass produced 90
+  `429` / 110 `200`.
 
 ## 11. API responsiveness, retries, and bounds
 
 - The API event loop never runs blocking I/O directly: boto3 calls are wrapped in
-  `asyncio.to_thread`, PyPDF extraction runs in a thread, Gemini calls are awaited (async SDK).
+  `asyncio.to_thread`, PyPDF extraction runs in a thread, both AI SDKs are awaited (async clients).
 - `/health/ready` runs each dependency check under a 5 s `asyncio.wait_for`.
 - Measured API responsiveness: 200 concurrent uploads were accepted with 0 HTTP errors (p95 upload
   1555 ms) while the worker was the bottleneck, and 100-document runs at client concurrency
-  1/10/50/100 had 0 errors and p95 upload latency 9/88/651/802 ms. See
-  [PERFORMANCE.md](PERFORMANCE.md).
-- Bounds (defaults in `app/config.py`): 20 MB per file, 5 files / 50 MB per batch, 50 pages
-  (PyPDF), 20 pages (AI parser), 200,000 extracted characters, 60 s provider timeout, 3 attempts,
-  600 s job deadline, 90 s lease / 15 s heartbeat, 24 h result TTL. The full table with the exact
-  enforcement point is in [API.md](API.md#limits); the concurrency and pacing knobs are tabled in
-  [DEVELOPING.md](DEVELOPING.md#tuning-knobs).
+  1/10/50/100 had 0 errors and p95 upload latency 9/88/651/802 ms. Since admission control and the
+  proxy rate limits landed, those numbers describe the unbounded past; they remain valid as a
+  measurement of the API's own capacity. See [PERFORMANCE.md](PERFORMANCE.md).
+- Bounds (defaults in `app/config.py`): 20 MB per file, 5 files / 50 MB per batch, 16 simultaneous
+  uploads, 50 pages (PyPDF), 20 pages (AI parsers), 200,000 extracted characters, 60 s provider
+  timeout, 3 attempts, 600 s job deadline, 90 s lease / 15 s heartbeat, 24 h result TTL. The full
+  table with the exact enforcement point is in [API.md](API.md#limits); the concurrency and pacing
+  knobs are tabled in [DEVELOPING.md](DEVELOPING.md#tuning-knobs); the per-IP nginx limits are in
+  section 10.4.
 - Retry policy lives in the worker: a `TransientError` gets `RETRY_BACKOFF_SECONDS` (2 s, 5 s,
   10 s, clamped to the last value) until `MAX_JOB_ATTEMPTS`, preferring the provider's
   `Retry-After` when the error carries one (clamped by `RETRY_AFTER_MAX_SECONDS`) and otherwise
   adding +/-20% jitter. A `PermanentError` fails immediately. A `RedisError` is neither: it is a
-  dependency blip, so it is re-raised and the job is deferred, never failed. Provider SDKs are
-  configured to make **one** attempt (`HttpRetryOptions(attempts=1)`) so the worker's budget and
-  the 60 s timeout stay authoritative.
-- The Gemini adapter maps provider failures into that vocabulary: 429/5xx/timeouts ->
-  `TransientError` (carrying `retry_after` when the provider sent one); other HTTP 4xx and
-  configuration/safety problems -> `PermanentError`. Every unknown failure is transient, so it is
-  retried a bounded number of times and then fails with a stable code.
+  dependency blip, so it is re-raised and the job is deferred, never failed. Both provider SDKs are
+  configured to make **one** attempt (Gemini `HttpRetryOptions(attempts=1)`, OpenAI
+  `max_retries=0`) so the worker's budget and the 60 s timeout stay authoritative.
+- Both provider adapters map failures into that vocabulary: 429/5xx/timeouts ->
+  `TransientError` (carrying `retry_after` when the provider sent one); configuration/permanent
+  4xx (Gemini: other 4xx, safety block; OpenAI: 401/403/other 4xx such as an unknown model) ->
+  `PermanentError`. Every unknown failure is transient, so it is retried a bounded number of times
+  and then fails with a stable code.
 - Single Redis instance is an explicit assumption; see section 6.

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from app.models import PageFormat, ParserId, ParserInfo
 from app.parsers.base import ParseLimits, Parser, Summarizer
@@ -20,13 +20,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _LABELS = {
-    ParserId.PYPDF: ("PyPDF", PageFormat.TEXT, "Local extract_text(); returns plain text, not markdown."),
+    ParserId.PYPDF: (
+        "PyPDF",
+        PageFormat.TEXT,
+        "Local extract_text(); returns plain text, not markdown.",
+    ),
     ParserId.GEMINI: ("Google Gemini", PageFormat.MARKDOWN, "Per-page markdown transcription."),
-    ParserId.GPT5_MINI: ("GPT-5 Mini", PageFormat.MARKDOWN, "Optional provider; enabled only when configured."),
+    ParserId.GPT5_MINI: (
+        "GPT-5 Mini",
+        PageFormat.MARKDOWN,
+        "Optional provider; enabled only when configured.",
+    ),
 }
 
 
-class ParserUnavailable(RuntimeError):
+class ParserUnavailableError(RuntimeError):
     """Requested parser cannot run in the current configuration."""
 
 
@@ -40,7 +48,7 @@ class _Entry:
 
 
 class ProviderRegistry:
-    def __init__(self, settings: "Settings") -> None:
+    def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._entries: dict[ParserId, _Entry] = {}
         self._summarizer: Summarizer | None = None
@@ -58,10 +66,8 @@ class ProviderRegistry:
         try:
             from app.parsers.pypdf_parser import PyPdfParser
 
-            self._entries[ParserId.PYPDF] = _Entry(
-                ParserId.PYPDF, True, PyPdfParser(), None, False
-            )
-        except Exception as exc:  # noqa: BLE001 - an import failure must not stop the app
+            self._entries[ParserId.PYPDF] = _Entry(ParserId.PYPDF, True, PyPdfParser(), None, False)
+        except Exception as exc:
             logger.error("parser_unavailable parser=pypdf error=%s", exc)
             self._entries[ParserId.PYPDF] = _Entry(
                 ParserId.PYPDF, False, None, f"adapter unavailable: {type(exc).__name__}", False
@@ -72,7 +78,7 @@ class ProviderRegistry:
             from app.providers.fake import FakeParser
 
             return FakeParser(parser_id, delay_seconds=self._settings.fake_delay_seconds)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.error("parser_unavailable parser=%s error=%s", parser_id.value, exc)
             return None
 
@@ -80,8 +86,11 @@ class ProviderRegistry:
         if self._fake:
             handler = self._fake_parser(ParserId.GEMINI)
             self._entries[ParserId.GEMINI] = _Entry(
-                ParserId.GEMINI, handler is not None, handler,
-                None if handler else "fake provider unavailable", True,
+                ParserId.GEMINI,
+                handler is not None,
+                handler,
+                None if handler else "fake provider unavailable",
+                True,
             )
             return
         if not self._settings.gemini_api_key:
@@ -100,43 +109,30 @@ class ProviderRegistry:
                 max_requests_per_minute=self._settings.provider_max_requests_per_minute,
             )
             self._entries[ParserId.GEMINI] = _Entry(ParserId.GEMINI, True, handler, None, True)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.error("parser_unavailable parser=gemini error=%s", exc)
             self._entries[ParserId.GEMINI] = _Entry(
                 ParserId.GEMINI, False, None, f"adapter unavailable: {type(exc).__name__}", True
             )
 
     def _build_openai(self) -> None:
-        # The unimplemented check comes FIRST, before the fake-mode branch. A parser with no
-        # implementation must never be advertised as usable, not even as a labelled stand-in:
-        # "enabled" would imply the capability exists. Fake mode substitutes only providers that
-        # have a real implementation to stand in for.
         try:
-            from app.parsers import openai_parser
-        except Exception as exc:  # noqa: BLE001
+            from app.parsers.openai_parser import OpenAIParser
+        except Exception as exc:
             logger.error("parser_unavailable parser=gpt-5-mini error=%s", exc)
             self._entries[ParserId.GPT5_MINI] = _Entry(
                 ParserId.GPT5_MINI, False, None, f"adapter unavailable: {type(exc).__name__}", True
             )
             return
 
-        if not getattr(openai_parser, "IMPLEMENTED", False):
-            # Never advertise a provider whose adapter is a declaration only. The reason is
-            # part of the API surface, so a reviewer can see why it is off.
-            self._entries[ParserId.GPT5_MINI] = _Entry(
-                ParserId.GPT5_MINI,
-                False,
-                None,
-                "not implemented in this delivery; use pypdf or gemini",
-                True,
-            )
-            return
-
         if self._fake:
             handler = self._fake_parser(ParserId.GPT5_MINI)
             self._entries[ParserId.GPT5_MINI] = _Entry(
-                ParserId.GPT5_MINI, handler is not None, handler,
-                None if handler else "fake provider unavailable", True,
+                ParserId.GPT5_MINI,
+                handler is not None,
+                handler,
+                None if handler else "fake provider unavailable",
+                True,
             )
             return
 
@@ -146,15 +142,17 @@ class ProviderRegistry:
             )
             return
         try:
-            handler = openai_parser.OpenAIParser(
+            handler = OpenAIParser(
                 api_key=self._settings.openai_api_key,
                 model=self._settings.openai_model,
                 timeout_seconds=self._settings.provider_timeout_seconds,
+                max_concurrency=self._settings.provider_max_concurrency,
+                max_requests_per_minute=self._settings.provider_max_requests_per_minute,
             )
             self._entries[ParserId.GPT5_MINI] = _Entry(
                 ParserId.GPT5_MINI, True, handler, None, True
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.error("parser_unavailable parser=gpt-5-mini error=%s", exc)
             self._entries[ParserId.GPT5_MINI] = _Entry(
                 ParserId.GPT5_MINI, False, None, f"adapter unavailable: {type(exc).__name__}", True
@@ -166,7 +164,7 @@ class ProviderRegistry:
                 from app.providers.fake import FakeSummarizer
 
                 self._summarizer = FakeSummarizer(delay_seconds=self._settings.fake_delay_seconds)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.error("summarizer_unavailable error=%s", exc)
             return
         if not self._settings.gemini_api_key:
@@ -181,12 +179,12 @@ class ProviderRegistry:
                 max_concurrency=self._settings.provider_max_concurrency,
                 max_requests_per_minute=self._settings.provider_max_requests_per_minute,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.error("summarizer_unavailable error=%s", exc)
 
     # ── queries ────────────────────────────────────────────────────────────────
     @property
-    def ai_mode(self) -> str:
+    def ai_mode(self) -> Literal["live", "fake"]:
         return self._settings.ai_mode
 
     def limits(self) -> ParseLimits:
@@ -200,11 +198,11 @@ class ProviderRegistry:
     def get_parser(self, parser_id: ParserId) -> Parser:
         blocking = self._blocking_reason()
         if blocking is not None:
-            raise ParserUnavailable(blocking)
+            raise ParserUnavailableError(blocking)
         entry = self._entries.get(parser_id)
         if entry is None or not entry.available or entry.handler is None:
             reason = entry.note if entry else "unknown parser"
-            raise ParserUnavailable(f"Parser {parser_id.value!r} is not available: {reason}")
+            raise ParserUnavailableError(f"Parser {parser_id.value!r} is not available: {reason}")
         return entry.handler
 
     def _blocking_reason(self) -> str | None:
@@ -228,15 +226,18 @@ class ProviderRegistry:
     def get_summarizer(self) -> Summarizer:
         if self._summarizer is None:
             if self._fake:
-                raise ParserUnavailable("Fake summarizer could not be constructed")
-            raise ParserUnavailable(
+                raise ParserUnavailableError("Fake summarizer could not be constructed")
+            raise ParserUnavailableError(
                 "Summarization requires GEMINI_API_KEY (the assessment mandates Gemini for summaries)"
             )
         return self._summarizer
 
     def summarizer_ready(self) -> tuple[bool, str]:
         if self._summarizer is not None:
-            return True, "fake summarizer" if self._fake else f"gemini:{self._settings.gemini_model}"
+            return (
+                True,
+                "fake summarizer" if self._fake else f"gemini:{self._settings.gemini_model}",
+            )
         if self._fake:
             return False, "fake summarizer unavailable"
         return False, "gemini_api_key not configured"
@@ -250,8 +251,12 @@ class ProviderRegistry:
             if entry is None:
                 out.append(
                     ParserInfo(
-                        id=parser_id, label=label, output_format=output_format,
-                        enabled=False, requires_api_key=False, note="not registered",
+                        id=parser_id,
+                        label=label,
+                        output_format=output_format,
+                        enabled=False,
+                        requires_api_key=False,
+                        note="not registered",
                     )
                 )
                 continue

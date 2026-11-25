@@ -1,12 +1,11 @@
 import { useEffect, useRef } from 'react';
-import { ApiError } from '../api';
-import { isTerminal, type DocumentDetail } from '../types';
-
-/** Per the delivery requirements: poll non-terminal documents every 1.5 s. */
-export const POLL_INTERVAL_MS = 1500;
-
-/** On HTTP errors back off 3 s → 6 s → 12 s → … capped here. */
-const MAX_BACKOFF_MS = 30_000;
+import {
+  isFatalPollError,
+  nextDelayMs,
+  POLL_INTERVAL_MS,
+  shouldContinue,
+} from '../polling';
+import type { DocumentDetail } from '../types';
 
 interface PollingCallbacks {
   onDetail: (detail: DocumentDetail) => void;
@@ -17,7 +16,8 @@ interface PollingCallbacks {
 /**
  * One recursive `setTimeout` chain per document id. Each chain is cancelled and aborted when
  * the hook unmounts or when the id set changes, so no timer or fetch outlives the component
- * and terminal documents are never polled again.
+ * and terminal documents are never polled again. The terminal/backoff policy itself lives in
+ * `../polling` as pure functions so it is testable without timers.
  */
 export function useDocumentPolling(
   ids: string[],
@@ -65,19 +65,17 @@ export function useDocumentPolling(
         if (disposed) return;
         latestCallbacks.current.onDetail(detail);
         // Terminal documents are final: stop this chain here.
-        if (isTerminal(detail.status)) return;
+        if (!shouldContinue(detail.status)) return;
         schedule(id, POLL_INTERVAL_MS, 0);
       } catch (err: unknown) {
         controllers.delete(id);
         if (disposed) return;
         if (err instanceof DOMException && err.name === 'AbortError') return;
-        const status = err instanceof ApiError ? err.status : 0;
-        const fatal = status === 404 || status === 410;
+        const fatal = isFatalPollError(err);
         const message = err instanceof Error && err.message ? err.message : 'Status check failed.';
         latestCallbacks.current.onError(id, message, fatal);
         if (fatal) return;
-        const backoffMs = Math.min(POLL_INTERVAL_MS * 2 ** (failures + 1), MAX_BACKOFF_MS);
-        schedule(id, backoffMs, failures + 1);
+        schedule(id, nextDelayMs(failures), failures + 1);
       }
     };
 

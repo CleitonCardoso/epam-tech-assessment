@@ -54,6 +54,7 @@ A parser is a class satisfying the `Parser` protocol in `app/parsers/base.py`:
 ```python
 class Parser(Protocol):
     id: ParserId
+
     async def parse(self, pdf: bytes, *, filename: str, limits: ParseLimits) -> ParseResult: ...
 ```
 

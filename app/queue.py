@@ -24,7 +24,7 @@ _FIELD = "document_id"
 
 
 class JobQueue:
-    def __init__(self, redis: Redis, settings: "Settings") -> None:
+    def __init__(self, redis: Redis, settings: Settings) -> None:
         self._redis = redis
         self._settings = settings
         self._stream = settings.stream_key
@@ -34,9 +34,7 @@ class JobQueue:
         """Create the group at 0 so jobs already in the stream are consumed too, not just new
         ones. `BUSYGROUP` is the only error that means 'already set up'."""
         try:
-            await self._redis.xgroup_create(
-                self._stream, self._group, id="0", mkstream=True
-            )
+            await self._redis.xgroup_create(self._stream, self._group, id="0", mkstream=True)
             logger.info("consumer_group_created stream=%s group=%s", self._stream, self._group)
         except ResponseError as exc:
             if "BUSYGROUP" not in str(exc):
@@ -69,15 +67,12 @@ class JobQueue:
         )
         # redis-py >=5 returns (cursor, entries, deleted); older versions omit the third field.
         entries = result[1] if len(result) > 1 else []
-        return [
-            (entry[0], self._field(entry[1]))
-            for entry in entries
-            if self._field(entry[1])
-        ]
+        return [(entry[0], self._field(entry[1])) for entry in entries if self._field(entry[1])]
 
     @staticmethod
-    def _field(fields: dict) -> str:
-        value = fields.get(_FIELD) or fields.get(_FIELD.encode())  # type: ignore[union-attr]
+    def _field(fields: dict[str, str] | dict[bytes, bytes]) -> str:
+        # The stream is read with decode_responses=True, but the contract allows raw bytes.
+        value: str | bytes | None = fields.get(_FIELD) or fields.get(_FIELD.encode())  # type: ignore[call-overload]
         if isinstance(value, bytes):
             value = value.decode()
         return value or ""
@@ -100,11 +95,16 @@ class JobQueue:
             await pipe.execute()
 
     async def pending(self) -> dict[str, int]:
-        """Diagnostics for the README: per-consumer pending counts."""
+        """Diagnostics: how many entries are in flight, across how many consumers.
+
+        `XPENDING` (summary form) returns the consumer breakdown as a list of [name, count] pairs,
+        so the consumer count is its length — not a number to be cast.
+        """
         summary = await self._redis.xpending(self._stream, self._group)
-        if isinstance(summary, dict):
-            return {
-                "pending": int(summary.get("pending", 0)),
-                "consumers": int(summary.get("consumers", 0)),
-            }
-        return {"pending": 0, "consumers": 0}
+        if not isinstance(summary, dict):
+            return {"pending": 0, "consumers": 0}
+        consumers = summary.get("consumers") or []
+        return {
+            "pending": int(summary.get("pending", 0)),
+            "consumers": len(consumers),
+        }

@@ -1,8 +1,10 @@
 """Fixtures that genuinely need a running stack — scoped to the integration suite.
 
-Keeping them here (and not in `tests/conftest.py`) is what allows `pytest tests/unit` to run
-offline: a session-wide autouse fixture in the parent conftest would make every unit test wait
-for an API that is not supposed to exist.
+Two deliberate choices:
+
+- These live here and not in `tests/conftest.py`, so `pytest tests/unit` runs offline.
+- The readiness wait belongs to the `client` fixture instead of an autouse fixture, so the
+  Redis-only repository tests do not need an API process at all.
 """
 
 from __future__ import annotations
@@ -15,14 +17,7 @@ import pytest
 from tests.conftest import API_BASE_URL, READY_TIMEOUT
 
 
-@pytest.fixture(scope="session")
-def client() -> httpx.Client:
-    with httpx.Client(base_url=API_BASE_URL, timeout=30.0) as http:
-        yield http
-
-
-@pytest.fixture(scope="session", autouse=True)
-def stack_ready(client: httpx.Client) -> None:
+def _wait_until_ready(client: httpx.Client) -> None:
     """Fail fast with a useful message instead of a wall of connection errors."""
     deadline = time.monotonic() + READY_TIMEOUT
     last_error: str | None = None
@@ -40,6 +35,13 @@ def stack_ready(client: httpx.Client) -> None:
         "Start it with: docker compose up -d",
         returncode=1,
     )
+
+
+@pytest.fixture(scope="session")
+def client() -> httpx.Client:
+    with httpx.Client(base_url=API_BASE_URL, timeout=30.0) as http:
+        _wait_until_ready(http)
+        yield http
 
 
 @pytest.fixture(scope="session")

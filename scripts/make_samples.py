@@ -113,14 +113,11 @@ def _build_pdf(pages: list[list[str]]) -> bytes:
         ).encode("ascii")
         stream = _content_stream(lines)
         objects[content_ids[index]] = (
-            f"<< /Length {len(stream)} >>\nstream\n".encode("ascii")
-            + stream
-            + b"\nendstream"
+            f"<< /Length {len(stream)} >>\nstream\n".encode("ascii") + stream + b"\nendstream"
         )
 
     objects[font_id] = (
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica "
-        b"/Encoding /WinAnsiEncoding >>"
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
     )
 
     highest_id = font_id
@@ -138,8 +135,7 @@ def _build_pdf(pages: list[list[str]]) -> bytes:
     for object_id in range(1, highest_id + 1):
         pdf += f"{offsets[object_id]:010d} 00000 n \n".encode("ascii")
     pdf += (
-        f"trailer\n<< /Size {highest_id + 1} /Root 1 0 R >>\n"
-        f"startxref\n{xref_offset}\n%%EOF\n"
+        f"trailer\n<< /Size {highest_id + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
     ).encode("ascii")
 
     # Self-check: every xref offset must point at that object's header, otherwise pypdf would
@@ -149,7 +145,7 @@ def _build_pdf(pages: list[list[str]]) -> bytes:
         if not bytes(pdf[offset : offset + len(header)]) == header:
             raise AssertionError(
                 f"make_samples: xref offset for object {object_id} is wrong "
-                f"({offset} -> {bytes(pdf[offset:offset + 16])!r})"
+                f"({offset} -> {bytes(pdf[offset : offset + 16])!r})"
             )
     return bytes(pdf)
 

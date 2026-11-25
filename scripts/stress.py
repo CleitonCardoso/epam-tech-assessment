@@ -49,7 +49,7 @@ import math
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -133,7 +133,7 @@ def _preview(value: str, limit: int = MAX_PREVIEW) -> str:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _percentile(ordered: list[float], percentile_value: float) -> float:
@@ -313,9 +313,7 @@ async def _settle_one(
                     f"/api/v1/documents/{document_id}"
                 )
             except httpx_module.HTTPError as exc:  # type: ignore[attr-defined]
-                outcome.detail = _preview(
-                    f"poll transport error: {type(exc).__name__}: {exc}"
-                )
+                outcome.detail = _preview(f"poll transport error: {type(exc).__name__}: {exc}")
             else:
                 outcome.polls += 1
                 if response.status_code == 404:
@@ -323,9 +321,7 @@ async def _settle_one(
                     outcome.detail = _preview(f"poll HTTP 404: {response.text}")
                     return outcome
                 if response.status_code != 200:
-                    outcome.detail = _preview(
-                        f"poll HTTP {response.status_code}: {response.text}"
-                    )
+                    outcome.detail = _preview(f"poll HTTP {response.status_code}: {response.text}")
                 else:
                     body = _parse_json(response)
                     if not isinstance(body, dict):
@@ -611,8 +607,7 @@ async def _run_async(args: argparse.Namespace, httpx: object) -> int:
         if live.status_code != 200:
             return _early_failure(
                 args,
-                f"{base_url}/health/live returned HTTP {live.status_code}: "
-                f"{_preview(live.text)}",
+                f"{base_url}/health/live returned HTTP {live.status_code}: {_preview(live.text)}",
             )
 
         run_start = time.monotonic()
@@ -699,9 +694,7 @@ async def _run_async(args: argparse.Namespace, httpx: object) -> int:
     unsettled = [outcome for outcome in settlements if outcome.status is None]
     timed_out = [outcome for outcome in settlements if outcome.timed_out]
     end_to_end_ms = [
-        outcome.end_to_end * 1000.0
-        for outcome in settled
-        if outcome.end_to_end is not None
+        outcome.end_to_end * 1000.0 for outcome in settled if outcome.end_to_end is not None
     ]
     terminal_counts: dict[str, int] = {"completed": 0, "failed": 0}
     for outcome in settled:
@@ -718,7 +711,9 @@ async def _run_async(args: argparse.Namespace, httpx: object) -> int:
             f"(by status: {_format_counter(http_errors_by_status)})"
         )
     if accepted != len(uploads):
-        problems.append(f"{len(uploads) - accepted} of {len(uploads)} uploaded file(s) were not accepted")
+        problems.append(
+            f"{len(uploads) - accepted} of {len(uploads)} uploaded file(s) were not accepted"
+        )
     if rejected_histogram:
         problems.append(
             f"{len(rejected_values)} file(s) rejected by the API "
@@ -788,7 +783,8 @@ async def _run_async(args: argparse.Namespace, httpx: object) -> int:
             for outcome in upload_errors[:MAX_DETAILS]
         ],
         "unsettled_details": [
-            {"id": outcome.document_id, "detail": outcome.detail} for outcome in unsettled[:MAX_DETAILS]
+            {"id": outcome.document_id, "detail": outcome.detail}
+            for outcome in unsettled[:MAX_DETAILS]
         ],
         "problems": problems,
         "success": not problems,
@@ -800,7 +796,9 @@ async def _run_async(args: argparse.Namespace, httpx: object) -> int:
         out_path = Path(args.json_out)
         try:
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            out_path.write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
         except OSError as exc:
             report["problems"].append(f"could not write --json-out {out_path}: {exc}")
             report["success"] = False

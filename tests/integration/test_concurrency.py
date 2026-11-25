@@ -111,9 +111,7 @@ async def _upload_many(
     return [result for result in results if isinstance(result, httpx.Response)]
 
 
-def _accepted_documents(
-    responses: list[httpx.Response], expected: int
-) -> list[dict]:
+def _accepted_documents(responses: list[httpx.Response], expected: int) -> list[dict]:
     """Assert every response is 202 and flatten the accepted documents out of the payloads."""
     bad = [
         (response.status_code, response.text[:300])
@@ -159,9 +157,7 @@ async def _settle_all(
         *(_wait_terminal(client, document_id, deadline) for document_id in document_ids)
     )
     missing = [
-        document_id
-        for document_id, body in zip(document_ids, finals)
-        if body is None
+        document_id for document_id, body in zip(document_ids, finals, strict=False) if body is None
     ]
     assert not missing, (
         f"{len(missing)}/{len(document_ids)} document(s) did not reach a terminal state "
@@ -192,17 +188,13 @@ def test_all_concurrent_uploads_are_accepted_and_complete() -> None:
             for body in finals
             if body.get("status") != "completed"
         ]
-        assert not not_completed, (
-            f"expected every document to complete, got: {not_completed[:5]}"
-        )
+        assert not not_completed, f"expected every document to complete, got: {not_completed[:5]}"
         short = [
             (body["id"], body.get("page_count"))
             for body in finals
             if (body.get("page_count") or 0) < 2
         ]
-        assert not short, (
-            f"expected every document to report page_count >= 2, got: {short[:5]}"
-        )
+        assert not short, f"expected every document to report page_count >= 2, got: {short[:5]}"
 
     asyncio.run(scenario())
 
@@ -251,9 +243,7 @@ def test_mixed_batch_under_load() -> None:
         corrupt_name, corrupt = _pdf("sample-corrupt.pdf")
         deadline = time.monotonic() + BURST_DEADLINE_SECONDS
         async with _client() as client:
-            uploads = [
-                _upload(client, valid_name, valid) for _ in range(MIXED_LOAD_SIZE)
-            ]
+            uploads = [_upload(client, valid_name, valid) for _ in range(MIXED_LOAD_SIZE)]
             # The mixed batch is just one more simultaneous request.
             uploads.append(_upload(client, valid_name, valid, extra=(corrupt_name, corrupt)))
             responses = await asyncio.gather(*uploads)

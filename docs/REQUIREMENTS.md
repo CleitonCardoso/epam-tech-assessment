@@ -69,8 +69,8 @@ Status vocabulary, used strictly:
 | 2 | Document upload and processing with PyPDF | **MET** — real extraction, ordered pages |
 | 3 | Async Redis queue with Streams | **MET** — consumer group verified end to end |
 | 4 | Summarization via Google Gemini | **MET** — live-verified (G1) |
-| 5 | Document processing via GPT-5 Mini (OCR) | **NOT MET** — G2 |
-| 6 | Frontend | **MET** |
+| 5 | Document processing via GPT-5 Mini (OCR) | **MET** — implemented and unit-tested against the Responses API; a live call needs `OPENAI_API_KEY` (G2) |
+| 6 | Frontend | **MET** — React UI, 8 proxy e2e tests, vitest suite |
 
 ---
 
@@ -107,22 +107,28 @@ Two things this exposed, both fixed:
 - Congestion is classified as `TransientError`, so it retries with backoff and finally fails with a
   stable code rather than hanging.
 
-### G2 — GPT-5 Mini (priority 5) is not implemented
+### G2 — GPT-5 Mini (priority 5): now implemented, live-verified only against a stub
 
-The brief mentions it once in the API contract and once in the priority list, below Gemini. No
-OpenAI credentials exist here, and the input path (PDF → vision, or PDF → images) cannot be
-verified without them. Rather than ship a stub that looks functional, the parser declares
-`IMPLEMENTED = False`; `GET /api/v1/parsers` reports `enabled: false` with
-"not implemented in this delivery; use pypdf or gemini", and uploads naming it get a `503`.
+**Status: implemented.** `app/parsers/openai_parser.py` + `app/providers/openai_adapter.py` send one
+page per Responses-API call with the page as an inline PDF (`input_file` + `input_text`), returning
+markdown, with the same page cap, pacing and permanent/transient error mapping as the Gemini adapter.
+The page splitter is shared (`app/parsers/pdf_pages.py`), so attribution is identical across
+providers.
 
-Honest reading: this is the one **NOT MET** requirement. It is also the second-lowest priority,
-and the plan explicitly permitted omission. Implementing it blind would add an unverifiable code
-path — a worse trade for a reviewer than an explicit, documented gap.
+What is covered by tests (`tests/unit/test_openai_parser.py`, 13 tests): the exact request payload,
+one call per page in order, the empty-page marker, all-empty → `OCR_REQUIRED`, transient vs
+permanent classification (`429`/`5xx` vs `401`/`404`), `Retry-After` parsing, and that the page cap is
+enforced *before* any provider call.
+
+What is **not** covered: a live OpenAI call. There are no OpenAI credentials in this environment, so
+the registry keeps the parser disabled (`enabled: false`, "OPENAI_API_KEY is not configured") until
+a key is supplied. That is now a configuration gap, not a missing feature.
 
 ### G3 — The UI was verified over HTTP, not visually
 
-`index.html`, the JS bundle and the CSS all serve `200`, and the nginx `/api` proxy reaches the
-API correctly. The page was never opened in a browser in this environment, so layout and
+`index.html`, the JS bundle and the CSS all serve `200`, the nginx `/api` proxy is covered by eight
+e2e tests, and the frontend now has its own vitest suite. The page was still never opened in a
+browser in this environment, so layout and
 interaction are unconfirmed. Open <http://localhost:3000> for a 10-second check.
 
 ### G4 — Bounded acceptance of "any PDF"

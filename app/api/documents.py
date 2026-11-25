@@ -15,7 +15,16 @@ import uuid
 from dataclasses import dataclass
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -25,14 +34,16 @@ from app.models import (
     DocumentAccepted,
     DocumentDetail,
     DocumentJob,
+    DocumentList,
     DocumentStatus,
+    DocumentSummary,
     ParserId,
     ParsersResponse,
     RejectedFile,
     UploadResponse,
     utc_now_iso,
 )
-from app.registry import ParserUnavailable, ProviderRegistry
+from app.registry import ParserUnavailableError, ProviderRegistry
 from app.storage.jobs import JobRepository
 from app.storage.objects import ObjectStoreError, S3ObjectStore
 
@@ -52,6 +63,8 @@ class AppContext:
     repo: JobRepository
     store: S3ObjectStore
     registry: ProviderRegistry
+    # Bounds simultaneous uploads (each one buffers its file in memory before the S3 write).
+    upload_slots: asyncio.Semaphore
 
 
 def get_ctx(request: Request) -> AppContext:
@@ -87,6 +100,52 @@ async def list_parsers(ctx: Ctx) -> ParsersResponse:
     return ParsersResponse(ai_mode=ctx.registry.ai_mode, parsers=ctx.registry.describe())
 
 
+@router.get(
+    "/documents",
+    response_model=DocumentList,
+    responses={503: {"description": "Redis unavailable"}},
+)
+async def list_documents(
+    ctx: Ctx,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    before: Annotated[
+        float | None,
+        Query(description="Only documents created before this epoch (the previous next_before)"),
+    ] = None,
+) -> DocumentList:
+    """Newest first, so a client can rebuild its state after a refresh.
+
+    Without this, the UI's document cards live only in memory: reloading the page lost every result
+    even though the server still had them for `RESULT_TTL_SECONDS`.
+    """
+    try:
+        # One extra row tells us whether another page exists without a second round trip.
+        jobs = await ctx.repo.list_recent(limit=limit + 1, before=before)
+        has_more = len(jobs) > limit
+        jobs = jobs[:limit]
+        next_before = await ctx.repo.score_of(jobs[-1].id) if has_more and jobs else None
+    except RedisError as exc:
+        raise HTTPException(
+            status_code=503, detail="The job store is unavailable; try again shortly."
+        ) from exc
+
+    return DocumentList(
+        documents=[
+            DocumentSummary(
+                id=job.id,
+                filename=job.filename,
+                parser=job.parser,
+                status=job.status,
+                page_count=job.page_count,
+                created_at=job.created_at,
+                status_url=f"/api/v1/documents/{job.id}",
+            )
+            for job in jobs
+        ],
+        next_before=next_before,
+    )
+
+
 @router.post(
     "/documents",
     status_code=202,
@@ -102,6 +161,39 @@ async def create_documents(
     parser: Annotated[str, Form(description="pypdf | gemini | gpt-5-mini")],
     files: Annotated[list[UploadFile], File(description="One or more PDF files")],
 ):
+    """Admission control, then accept.
+
+    Uploads buffer the whole file in memory before the S3 write, so an unbounded number of
+    simultaneous uploads is the one cheap way to exhaust a small host. The semaphore is the
+    backpressure: past the limit, requests wait briefly and then get a truthful 503 with a
+    Retry-After header instead of being buffered anyway.
+    """
+    settings = ctx.settings
+    try:
+        await asyncio.wait_for(
+            ctx.upload_slots.acquire(), timeout=settings.upload_slot_timeout_seconds
+        )
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The server is at its concurrent-upload limit "
+                f"(MAX_CONCURRENT_UPLOADS={settings.max_concurrent_uploads}). Retry shortly."
+            ),
+            headers={"Retry-After": "1"},
+        ) from exc
+
+    try:
+        return await _accept_documents(ctx, parser, files)
+    finally:
+        ctx.upload_slots.release()
+
+
+async def _accept_documents(
+    ctx: Ctx,
+    parser: str,
+    files: list[UploadFile],
+):
     settings = ctx.settings
 
     try:
@@ -114,7 +206,7 @@ async def create_documents(
 
     try:
         ctx.registry.get_parser(parser_id)
-    except ParserUnavailable as exc:
+    except ParserUnavailableError as exc:
         raise HTTPException(
             status_code=503,
             detail=f"Parser {parser_id.value!r} is not available right now. {exc}",
@@ -142,10 +234,7 @@ async def create_documents(
         if exceeded:
             raise HTTPException(
                 status_code=413,
-                detail=(
-                    f"{filename} exceeds MAX_UPLOAD_BYTES="
-                    f"{settings.max_upload_bytes} bytes."
-                ),
+                detail=(f"{filename} exceeds MAX_UPLOAD_BYTES={settings.max_upload_bytes} bytes."),
             )
         total_bytes += len(data)
         if total_bytes > settings.max_batch_bytes:
@@ -243,7 +332,10 @@ async def create_documents(
 @router.get(
     "/documents/{document_id}",
     response_model=DocumentDetail,
-    responses={404: {"description": "Unknown or expired document"}, 503: {"description": "Redis unavailable"}},
+    responses={
+        404: {"description": "Unknown or expired document"},
+        503: {"description": "Redis unavailable"},
+    },
 )
 async def get_document(document_id: str, ctx: Ctx) -> DocumentDetail:
     try:

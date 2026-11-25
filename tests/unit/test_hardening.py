@@ -13,6 +13,7 @@ These are pure unit tests: no Redis, no network, no Docker.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from app.config import Settings
 from app.parsers.base import ParserError, PermanentError, TransientError
@@ -30,7 +31,9 @@ class _Response:
 
 
 class _ProviderError(Exception):
-    def __init__(self, message: str, *, code: int | None = None, headers: dict[str, str] | None = None):
+    def __init__(
+        self, message: str, *, code: int | None = None, headers: dict[str, str] | None = None
+    ):
         super().__init__(message)
         self.code = code
         self.response = _Response(headers or {})
@@ -49,7 +52,9 @@ class TestRetryAfterParsing:
         assert _retry_after_seconds(exc) == 7.0
 
     def test_ignores_http_date_form_instead_of_guessing(self) -> None:
-        exc = _ProviderError("429", code=429, headers={"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"})
+        exc = _ProviderError(
+            "429", code=429, headers={"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}
+        )
         assert _retry_after_seconds(exc) is None
 
     def test_absent_header_is_none(self) -> None:
@@ -67,11 +72,15 @@ class TestProviderErrorMapping:
         assert mapped.retry_after == 3.0
 
     def test_503_is_transient(self) -> None:
-        mapped = map_provider_error(_ProviderError("unavailable", code=503), default_code="PROVIDER_ERROR")
+        mapped = map_provider_error(
+            _ProviderError("unavailable", code=503), default_code="PROVIDER_ERROR"
+        )
         assert isinstance(mapped, TransientError)
 
     def test_401_is_permanent(self) -> None:
-        mapped = map_provider_error(_ProviderError("bad key", code=401), default_code="PROVIDER_ERROR")
+        mapped = map_provider_error(
+            _ProviderError("bad key", code=401), default_code="PROVIDER_ERROR"
+        )
         assert isinstance(mapped, PermanentError)
         assert mapped.retryable is False
 
@@ -107,7 +116,7 @@ class TestSettingsForPacing:
         assert settings.retry_after_max_seconds > 0
 
     def test_zero_concurrency_is_rejected(self) -> None:
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             Settings(_env_file=None, provider_max_concurrency=0)
 
 
@@ -117,3 +126,19 @@ class TestParserErrorContract:
 
     def test_retry_after_is_preserved(self) -> None:
         assert TransientError("x", retry_after=12.5).retry_after == 12.5
+
+
+class TestAdmissionControlSettings:
+    def test_concurrent_uploads_must_be_positive(self) -> None:
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, max_concurrent_uploads=0)
+
+    def test_upload_slot_timeout_must_be_positive(self) -> None:
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, upload_slot_timeout_seconds=0)
+
+    def test_defaults_bound_memory(self) -> None:
+        settings = Settings(_env_file=None)
+        # Worst case buffered bytes if every slot held a full batch.
+        worst_case = settings.max_concurrent_uploads * settings.max_batch_bytes
+        assert worst_case == 16 * 50 * 1024 * 1024

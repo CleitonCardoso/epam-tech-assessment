@@ -185,12 +185,12 @@ attorney. Uploaded from the host with `curl`, one at a time, `parser=pypdf` unle
 **The scan is the interesting row.** `parser=pypdf` cannot read an image-only page, so the document
 fails with a stable, actionable code (`OCR_REQUIRED`, message tells the user to choose Gemini). The
 same file re-uploaded with `parser=gemini` completed in 5.9 s and returned a faithful transcription
-of the page plus a correct document summary — that is the whole reason the two parsers exist.
+of the page plus a correct document summary â€” that is the whole reason the two parsers exist.
 
 Also verified on this corpus:
 
 - **AI page cap**: a 24-page deck selected with `parser=gemini` fails fast with
-  `TOO_MANY_PAGES_FOR_AI` and the message "Use the PyPDF parser for large documents" — before any
+  `TOO_MANY_PAGES_FOR_AI` and the message "Use the PyPDF parser for large documents" â€” before any
   provider call is made, so a mis-selection costs no quota. The same file succeeds with `pypdf`.
 - **Accents and Portuguese** survive extraction (invoice text came back with correct encoding).
 - **Text-heavy slide decks are slow**: 24 pages took 35 s with PyPDF while a 34-page book took 8.8 s,

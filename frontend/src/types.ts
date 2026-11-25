@@ -5,13 +5,27 @@
 
 export type AiMode = 'live' | 'fake';
 
-export type DocumentStatus =
-  | 'queued'
-  | 'parsing'
-  | 'summarizing'
-  | 'retrying'
-  | 'completed'
-  | 'failed';
+/**
+ * The six statuses the API can report, in the order a document moves through them
+ * (terminal ones last). Kept as a const array so the wire guard and the tests can iterate
+ * over exactly the values of `DocumentStatus`.
+ */
+export const DOCUMENT_STATUSES = [
+  'queued',
+  'parsing',
+  'summarizing',
+  'retrying',
+  'completed',
+  'failed',
+] as const;
+
+export type DocumentStatus = (typeof DOCUMENT_STATUSES)[number];
+
+export function isDocumentStatus(value: unknown): value is DocumentStatus {
+  return (
+    typeof value === 'string' && (DOCUMENT_STATUSES as readonly string[]).includes(value)
+  );
+}
 
 export type PageFormat = 'text' | 'markdown';
 
@@ -53,6 +67,23 @@ export interface RejectedFile {
 export interface UploadResponse {
   documents: DocumentAccepted[];
   rejected: RejectedFile[];
+}
+
+/** GET /api/v1/documents -> documents[]; one summary row per known (non-expired) document. */
+export interface DocumentSummary {
+  id: string;
+  filename: string;
+  parser: string;
+  status: DocumentStatus;
+  page_count: number | null;
+  created_at: string;
+  status_url: string;
+}
+
+/** GET /api/v1/documents -> 200 (newest first; `next_before` is the next page cursor). */
+export interface DocumentListResponse {
+  documents: DocumentSummary[];
+  next_before: number | null;
 }
 
 /** ErrorInfo from app/models.py, surfaced on a failed document. */

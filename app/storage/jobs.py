@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any
+import time
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from redis.asyncio import Redis
 from redis.exceptions import WatchError
@@ -23,6 +24,7 @@ from app.models import (
     DocumentStatus,
     ErrorInfo,
     PageResult,
+    ParserId,
     utc_now_iso,
 )
 
@@ -35,6 +37,9 @@ JOB_KEY = "docs:job:{id}"
 PAGES_KEY = "docs:pages:{id}"
 SUMMARY_KEY = "docs:summary:{id}"
 LEASE_KEY = "docs:lease:{id}"
+# Sorted set of document ids, scored by creation epoch. Listings read this instead of scanning
+# keys; entries are pruned past the result TTL on every write, so it cannot grow without bound.
+INDEX_KEY = "docs:index"
 
 # Renew/delete only if the caller still owns the token.
 _RENEW = """
@@ -52,9 +57,20 @@ return 0
 
 
 class JobRepository:
-    def __init__(self, redis: Redis, settings: "Settings") -> None:
+    def __init__(self, redis: Redis, settings: Settings) -> None:
         self._redis = redis
         self._settings = settings
+
+    @property
+    def _r(self) -> Any:
+        """The Redis client, typed loosely on purpose.
+
+        redis-py annotates every async command as ``Awaitable[T] | T``, which mypy cannot await
+        without a cast at each of ~30 call sites. The repository's behaviour is covered by
+        ``tests/integration/test_repository.py`` against a real Redis instead, which is stronger
+        evidence than casts would be.
+        """
+        return self._redis
 
     # ── keys ───────────────────────────────────────────────────────────────────
     @staticmethod
@@ -95,12 +111,16 @@ class JobRepository:
     def _from_hash(raw: dict[str, str]) -> DocumentJob:
         page_count = raw.get("page_count") or ""
         error_raw = raw.get("error") or ""
+        stage = raw.get("stage") or None
         return DocumentJob(
             id=raw["id"],
             filename=raw["filename"],
-            parser=raw["parser"],
+            parser=ParserId(raw["parser"]),
             status=DocumentStatus(raw["status"]),
-            stage=(raw.get("stage") or None),
+            # The hash stores a plain string; narrow it back to the Literal the model expects.
+            stage=cast("Literal['parsing', 'summarizing']", stage)
+            if stage in ("parsing", "summarizing")
+            else None,
             attempt=int(raw.get("attempt") or 0),
             created_at=raw["created_at"],
             updated_at=raw["updated_at"],
@@ -113,25 +133,50 @@ class JobRepository:
 
     # ── acceptance ─────────────────────────────────────────────────────────────
     async def create_and_enqueue(self, job: DocumentJob) -> None:
-        """Job hash + stream entry, atomically. Raises RedisError upward: the caller must not
-        report acceptance unless this returns normally."""
-        async with self._redis.pipeline(transaction=True) as pipe:
+        """Job hash + stream entry + list index, atomically.
+
+        Raises RedisError upward: the caller must not report acceptance unless this returns
+        normally. The index entry is what lets the UI rebuild its state after a refresh.
+        """
+        now = time.time()
+        prune_before = now - self._settings.result_ttl_seconds
+        async with self._r.pipeline(transaction=True) as pipe:
             pipe.hset(self.job_key(job.id), mapping=self._to_hash(job))
             pipe.xadd(self._settings.stream_key, {"document_id": job.id})
+            pipe.zadd(INDEX_KEY, {job.id: now})
+            # Bounded growth: anything older than the retention window is not fetchable anyway.
+            pipe.zremrangebyscore(INDEX_KEY, "-inf", prune_before)
             await pipe.execute()
+
+    async def score_of(self, document_id: str) -> float | None:
+        """Creation epoch of a document, used as the pagination cursor."""
+        score = await self._r.zscore(INDEX_KEY, document_id)
+        return float(score) if score is not None else None
+
+    async def list_recent(self, *, limit: int, before: float | None = None) -> list[DocumentJob]:
+        """Newest first, optionally older than `before` (epoch). Missing hashes are skipped."""
+        max_score = f"({before}" if before is not None else "+inf"
+        ids = await self._r.zrevrangebyscore(INDEX_KEY, max_score, "-inf", start=0, num=limit)
+        if not ids:
+            return []
+        pipe = self._r.pipeline(transaction=False)
+        for document_id in ids:
+            pipe.hgetall(self.job_key(document_id))
+        rows = await pipe.execute()
+        return [self._from_hash(raw) for raw in rows if raw]
 
     # ── reads ──────────────────────────────────────────────────────────────────
     async def get(self, document_id: str) -> DocumentJob | None:
-        raw = await self._redis.hgetall(self.job_key(document_id))
+        raw = await self._r.hgetall(self.job_key(document_id))
         if not raw:
             return None
         return self._from_hash(raw)
 
     async def exists(self, document_id: str) -> bool:
-        return bool(await self._redis.exists(self.job_key(document_id)))
+        return bool(await self._r.exists(self.job_key(document_id)))
 
     async def get_pages(self, document_id: str) -> tuple[list[PageResult], list[str]] | None:
-        raw = await self._redis.get(self.pages_key(document_id))
+        raw = await self._r.get(self.pages_key(document_id))
         if not raw:
             return None
         payload = json.loads(raw)
@@ -139,7 +184,7 @@ class JobRepository:
         return pages, list(payload.get("warnings", []))
 
     async def get_summary(self, document_id: str) -> str | None:
-        return await self._redis.get(self.summary_key(document_id))
+        return await self._r.get(self.summary_key(document_id))
 
     # ── fenced writes ──────────────────────────────────────────────────────────
     async def _begin_fenced(self, pipe: Any, document_id: str, token: str) -> bool:
@@ -161,7 +206,7 @@ class JobRepository:
         stage: str | None,
         attempt: int | None = None,
     ) -> bool:
-        pipe = self._redis.pipeline(transaction=True)
+        pipe = self._r.pipeline(transaction=True)
         try:
             if not await self._begin_fenced(pipe, document_id, token):
                 return False
@@ -193,7 +238,7 @@ class JobRepository:
                 "warnings": warnings,
             }
         )
-        pipe = self._redis.pipeline(transaction=True)
+        pipe = self._r.pipeline(transaction=True)
         try:
             if not await self._begin_fenced(pipe, document_id, token):
                 return False
@@ -224,7 +269,7 @@ class JobRepository:
         stream_id: str,
         group: str,
     ) -> bool:
-        pipe = self._redis.pipeline(transaction=True)
+        pipe = self._r.pipeline(transaction=True)
         try:
             if not await self._begin_fenced(pipe, document_id, token):
                 return False
@@ -262,7 +307,7 @@ class JobRepository:
         stream_id: str,
         group: str,
     ) -> bool:
-        pipe = self._redis.pipeline(transaction=True)
+        pipe = self._r.pipeline(transaction=True)
         try:
             if not await self._begin_fenced(pipe, document_id, token):
                 return False
@@ -287,8 +332,10 @@ class JobRepository:
         except WatchError:
             return False
 
-    async def mark_retry(self, document_id: str, *, token: str, error: ErrorInfo, attempt: int) -> bool:
-        pipe = self._redis.pipeline(transaction=True)
+    async def mark_retry(
+        self, document_id: str, *, token: str, error: ErrorInfo, attempt: int
+    ) -> bool:
+        pipe = self._r.pipeline(transaction=True)
         try:
             if not await self._begin_fenced(pipe, document_id, token):
                 return False
@@ -310,7 +357,7 @@ class JobRepository:
     # ── lease ──────────────────────────────────────────────────────────────────
     async def acquire_lease(self, document_id: str, token: str) -> bool:
         return bool(
-            await self._redis.set(
+            await self._r.set(
                 self.lease_key(document_id),
                 token,
                 nx=True,
@@ -319,16 +366,16 @@ class JobRepository:
         )
 
     async def renew_lease(self, document_id: str, token: str) -> bool:
-        renewed = await self._redis.eval(
-            _RENEW, 1, self.lease_key(document_id), token, self._settings.lease_seconds * 1000
+        renewed = await self._r.eval(
+            _RENEW, 1, self.lease_key(document_id), token, str(self._settings.lease_seconds * 1000)
         )
         return bool(renewed)
 
     async def release_lease(self, document_id: str, token: str) -> None:
         try:
-            await self._redis.eval(_RELEASE, 1, self.lease_key(document_id), token)
-        except Exception:  # noqa: BLE001 — release is best effort, never fail a job over it
+            await self._r.eval(_RELEASE, 1, self.lease_key(document_id), token)
+        except Exception:
             logger.warning("lease_release_failed document_id=%s", document_id)
 
     async def increment_attempt(self, document_id: str) -> int:
-        return int(await self._redis.hincrby(self.job_key(document_id), "attempt", 1))
+        return int(await self._r.hincrby(self.job_key(document_id), "attempt", 1))

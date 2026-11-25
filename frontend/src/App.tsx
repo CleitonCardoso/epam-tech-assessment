@@ -12,11 +12,18 @@ import {
   errorMessage,
   fetchDocument,
   fetchParsers,
+  fetchRecentDocuments,
   rejectedFromErrorBody,
   uploadDocuments,
 } from './api';
 import { DocumentCard, type DocumentCardState } from './components/DocumentCard';
 import { useDocumentPolling } from './hooks/useDocumentPolling';
+import {
+  mergeRecentCards,
+  pollingIds,
+  summariesToCards,
+  terminalIds,
+} from './recentDocuments';
 import { isTerminal, type DocumentDetail, type ParsersResponse, type RejectedFile } from './types';
 
 type ParsersState =
@@ -26,6 +33,17 @@ type ParsersState =
 
 const FAKE_MODE_BANNER =
   'Fake AI mode — summaries and markdown are deterministic stand-ins, no model was called.';
+
+/** "Polling N active documents" note, reused by the recent and session card sections. */
+function PollingNote({ count }: { count: number }): JSX.Element | null {
+  if (count === 0) return null;
+  return (
+    <span className="polling-note">
+      <span className="pulse" aria-hidden="true" />
+      Polling {count} active {count === 1 ? 'document' : 'documents'} every 1.5 s
+    </span>
+  );
+}
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -45,6 +63,7 @@ export default function App(): JSX.Element {
 
   const [cards, setCards] = useState<DocumentCardState[]>([]);
   const [activeIds, setActiveIds] = useState<string[]>([]);
+  const [recentError, setRecentError] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -116,6 +135,42 @@ export default function App(): JSX.Element {
     onError: handlePollError,
   });
 
+  // -- recent documents: rebuild cards after a reload -----------------------
+  // The server keeps results for hours, but before this the cards lived only in React memory.
+  // Fetch the first page (limit 20, no pagination UI), map the summaries onto the same card
+  // state, and poll only the non-terminal ones. A failure is quiet: the upload form must keep
+  // working even when the recent list cannot be loaded.
+  useEffect(() => {
+    const controller = new AbortController();
+    let cancelled = false;
+    fetchRecentDocuments(20, null, controller.signal)
+      .then((list) => {
+        if (cancelled) return;
+        const recent = summariesToCards(list);
+        if (recent.length === 0) return;
+        setCards((prev) => mergeRecentCards(prev, recent));
+        setActiveIds((prev) => [...new Set([...prev, ...pollingIds(recent)])]);
+        // Terminal cards must not poll. Fetch each detail exactly once so a completed summary
+        // and its pages survive the reload; if that single fetch fails, keep the summary status.
+        for (const id of terminalIds(recent)) {
+          fetchDocument(id, controller.signal)
+            .then((detail) => {
+              if (!cancelled) handleDetail(detail);
+            })
+            .catch(() => undefined);
+        }
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setRecentError(true);
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [handleDetail]);
+
   // ── form handlers ──────────────────────────────────────────────────────────
   const clearFileInput = (): void => {
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -169,6 +224,26 @@ export default function App(): JSX.Element {
 
   // ── render ─────────────────────────────────────────────────────────────────
   const parserById = new Map(parsers.map((parser) => [parser.id, parser] as const));
+  // Rehydrated cards ("Recent documents") and cards uploaded in this session share one state
+  // array so the existing polling callbacks keep both in sync; `source` only decides which
+  // section renders a card.
+  const recentCards = cards.filter((card) => card.source === 'recent');
+  const sessionCards = cards.filter((card) => card.source !== 'recent');
+  const activeIdSet = new Set(activeIds);
+  const activeRecentCount = recentCards.filter((card) => activeIdSet.has(card.accepted.id)).length;
+  const activeSessionCount = sessionCards.filter((card) => activeIdSet.has(card.accepted.id)).length;
+  // Before the first upload the empty results section is the onboarding message; once a reload
+  // has restored documents it would be misleading, so the session section only appears when it
+  // has cards of its own.
+  const showSessionResults = sessionCards.length > 0 || recentCards.length === 0;
+
+  const renderCard = (card: DocumentCardState): JSX.Element => (
+    <DocumentCard
+      key={card.accepted.id}
+      state={card}
+      parser={parserById.get(card.detail?.parser ?? card.accepted.parser)}
+    />
+  );
 
   return (
     <div className="app">
@@ -330,31 +405,35 @@ export default function App(): JSX.Element {
           </div>
         ) : null}
 
-        <section className="results" aria-labelledby="results-heading">
-          <div className="results-head">
-            <h2 id="results-heading">Documents ({cards.length})</h2>
-            {activeIds.length > 0 ? (
-              <span className="polling-note">
-                <span className="pulse" aria-hidden="true" />
-                Polling {activeIds.length} active {activeIds.length === 1 ? 'document' : 'documents'}{' '}
-                every 1.5 s
-              </span>
-            ) : null}
-          </div>
-          {cards.length === 0 ? (
-            <p className="empty">Nothing uploaded yet. Pick one or more PDFs above.</p>
-          ) : (
-            <div className="card-grid">
-              {cards.map((card) => (
-                <DocumentCard
-                  key={card.accepted.id}
-                  state={card}
-                  parser={parserById.get(card.detail?.parser ?? card.accepted.parser)}
-                />
-              ))}
+        {recentError && recentCards.length === 0 ? (
+          <p className="help" role="status">
+            Could not load recent documents.
+          </p>
+        ) : null}
+
+        {recentCards.length > 0 ? (
+          <section className="results" aria-labelledby="recent-heading">
+            <div className="results-head">
+              <h2 id="recent-heading">Recent documents</h2>
+              <PollingNote count={activeRecentCount} />
             </div>
-          )}
-        </section>
+            <div className="card-grid">{recentCards.map(renderCard)}</div>
+          </section>
+        ) : null}
+
+        {showSessionResults ? (
+          <section className="results" aria-labelledby="results-heading">
+            <div className="results-head">
+              <h2 id="results-heading">Documents ({sessionCards.length})</h2>
+              <PollingNote count={activeSessionCount} />
+            </div>
+            {sessionCards.length === 0 ? (
+              <p className="empty">Nothing uploaded yet. Pick one or more PDFs above.</p>
+            ) : (
+              <div className="card-grid">{sessionCards.map(renderCard)}</div>
+            )}
+          </section>
+        ) : null}
       </main>
 
       <footer className="app-footer">

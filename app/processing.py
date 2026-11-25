@@ -19,7 +19,7 @@ from app.parsers.base import (
     TransientError,
     validate_pages,
 )
-from app.registry import ParserUnavailable, ProviderRegistry
+from app.registry import ParserUnavailableError, ProviderRegistry
 from app.storage.jobs import JobRepository
 from app.storage.objects import ObjectStoreError, S3ObjectStore
 
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class LeaseLost(Exception):
+class LeaseLostError(Exception):
     """This execution no longer owns the job; stop immediately and write nothing."""
 
 
@@ -46,7 +46,7 @@ class JobProcessor:
     def __init__(
         self,
         *,
-        settings: "Settings",
+        settings: Settings,
         repo: JobRepository,
         store: S3ObjectStore,
         registry: ProviderRegistry,
@@ -72,9 +72,7 @@ class JobProcessor:
         if checkpoint is not None:
             pages, stored_warnings = checkpoint
             warnings = _merge_warnings(stored_warnings, job.warnings)
-            logger.info(
-                "job_resumed id=%s pages=%d (skipping extraction)", job.id, len(pages)
-            )
+            logger.info("job_resumed id=%s pages=%d (skipping extraction)", job.id, len(pages))
         else:
             pages, warnings = await self._extract(job, token=token, warnings=warnings)
 
@@ -93,11 +91,11 @@ class JobProcessor:
         if not await self._repo.set_stage(
             job.id, token=token, status=DocumentStatus.PARSING, stage="parsing"
         ):
-            raise LeaseLost()
+            raise LeaseLostError()
 
         try:
             parser = self._registry.get_parser(job.parser)
-        except ParserUnavailable as exc:
+        except ParserUnavailableError as exc:
             raise PermanentError(str(exc), code="PARSER_UNAVAILABLE") from exc
 
         try:
@@ -116,7 +114,7 @@ class JobProcessor:
                 parser.parse(pdf, filename=job.filename, limits=self._registry.limits()),
                 timeout=self._settings.provider_timeout_seconds + 30,
             )
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             raise TransientError(
                 "The parser did not finish in time.", code="PARSER_TIMEOUT"
             ) from exc
@@ -125,7 +123,7 @@ class JobProcessor:
         merged = _merge_warnings(warnings, result.warnings)
 
         if not await self._repo.save_pages(job.id, token=token, pages=pages, warnings=merged):
-            raise LeaseLost()
+            raise LeaseLostError()
         logger.info("pages_checkpointed id=%s pages=%d", job.id, len(pages))
         return pages, merged
 
@@ -141,11 +139,11 @@ class JobProcessor:
         if not await self._repo.set_stage(
             job.id, token=token, status=DocumentStatus.SUMMARIZING, stage="summarizing"
         ):
-            raise LeaseLost()
+            raise LeaseLostError()
 
         try:
             summarizer = self._registry.get_summarizer()
-        except ParserUnavailable as exc:
+        except ParserUnavailableError as exc:
             raise PermanentError(str(exc), code="SUMMARIZER_UNAVAILABLE") from exc
 
         try:
@@ -155,7 +153,7 @@ class JobProcessor:
                 ),
                 timeout=self._settings.provider_timeout_seconds + 15,
             )
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             raise TransientError(
                 "Summarization did not finish in time.", code="SUMMARY_TIMEOUT"
             ) from exc
@@ -176,7 +174,7 @@ class JobProcessor:
             group=self._settings.consumer_group,
         )
         if not committed:
-            raise LeaseLost()
+            raise LeaseLostError()
 
         # Only after the terminal state is durable. A leftover object is harmless; a job
         # pointing at a deleted object is not.

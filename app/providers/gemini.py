@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
-from typing import Any, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any, cast
 
 from app.models import PageResult
-from app.parsers.base import PermanentError, ParserError, Summarizer, TransientError
+from app.parsers.base import ParserError, PermanentError, Summarizer, TransientError
+from app.providers.pacing import ProviderPacer
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +64,9 @@ def _retry_after_seconds(exc: BaseException) -> float | None:
     for headers in candidates:
         if not headers:
             continue
+        header_map = cast("Mapping[str, str]", headers)
         try:
-            raw = headers.get("retry-after") or headers.get("Retry-After")
+            raw = header_map.get("retry-after") or header_map.get("retry-after".title())
         except AttributeError:
             continue
         if not raw:
@@ -98,13 +100,35 @@ def map_provider_error(exc: BaseException, *, default_code: str) -> ParserError:
             code="PROVIDER_CONFIG",
         )
 
-    if any(hint in text for hint in ("timeout", "timed out", "deadline", "unavailable", "429", "rate limit", "resource_exhausted")):
+    if any(
+        hint in text
+        for hint in (
+            "timeout",
+            "timed out",
+            "deadline",
+            "unavailable",
+            "429",
+            "rate limit",
+            "resource_exhausted",
+        )
+    ):
         return TransientError(
             "The AI provider call timed out or was rate limited.",
             code=default_code,
             retry_after=retry_after,
         )
-    if any(hint in text for hint in ("api key", "api_key", "permission", "unauthorized", "not found", "invalid argument", "unsupported model")):
+    if any(
+        hint in text
+        for hint in (
+            "api key",
+            "api_key",
+            "permission",
+            "unauthorized",
+            "not found",
+            "invalid argument",
+            "unsupported model",
+        )
+    ):
         return PermanentError(
             "The AI provider rejected the configuration (check the API key and model name).",
             code="PROVIDER_CONFIG",
@@ -141,37 +165,20 @@ class GeminiClient:
         http_options = types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1))
         self._client = genai.Client(api_key=api_key, http_options=http_options)
 
-        # Two pacing layers. The semaphore bounds simultaneous requests; the token bucket bounds
-        # requests per minute. Without them N parallel jobs means N x calls per second, the
-        # provider answers 429, and our retry budget is spent on errors instead of work.
-        self._slots = asyncio.Semaphore(max(1, max_concurrency))
-        self._max_rpm = max(0, max_requests_per_minute)
-        self._tokens = float(self._max_rpm)
-        self._tokens_at = time.monotonic()
-        self._rate_lock = asyncio.Lock()
-
-    async def _pace(self) -> None:
-        """Token bucket, refilled continuously. Disabled when max_requests_per_minute is 0."""
-        if not self._max_rpm:
-            return
-        async with self._rate_lock:
-            while True:
-                now = time.monotonic()
-                self._tokens = min(
-                    float(self._max_rpm),
-                    self._tokens + (now - self._tokens_at) * (self._max_rpm / 60.0),
-                )
-                self._tokens_at = now
-                if self._tokens >= 1.0:
-                    self._tokens -= 1.0
-                    return
-                await asyncio.sleep((1.0 - self._tokens) * (60.0 / self._max_rpm))
+        # Pacing lives in ProviderPacer, shared with the OpenAI adapter: a semaphore for
+        # concurrency and a token bucket for requests per minute.
+        self._pacer = ProviderPacer(
+            max_concurrency=max_concurrency,
+            max_requests_per_minute=max_requests_per_minute,
+        )
 
     @property
     def model(self) -> str:
         return self._model
 
-    async def generate(self, contents: Sequence[Any], *, timeout_seconds: float | None = None) -> str:
+    async def generate(
+        self, contents: Sequence[Any], *, timeout_seconds: float | None = None
+    ) -> str:
         from google.genai import types
 
         timeout = timeout_seconds or self._timeout
@@ -192,19 +199,21 @@ class GeminiClient:
                 config=config,
             )
 
-        async with self._slots:
-            await self._pace()
+        await self._pacer.acquire()
+        try:
             try:
                 response = await asyncio.wait_for(_call(), timeout=timeout)
-            except asyncio.TimeoutError as exc:
+            except TimeoutError as exc:
                 raise TransientError(
                     f"The AI provider did not answer within {timeout:.0f}s.",
                     code="PROVIDER_TIMEOUT",
                 ) from exc
             except ParserError:
                 raise
-            except Exception as exc:  # noqa: BLE001 — every SDK failure goes through the mapper
+            except Exception as exc:
                 raise map_provider_error(exc, default_code="PROVIDER_ERROR") from exc
+        finally:
+            self._pacer.release()
 
         return self._extract_text(response)
 
@@ -225,7 +234,7 @@ class GeminiClient:
             parts: list[str] = []
             for candidate in candidates:
                 content = getattr(candidate, "content", None)
-                for part in (getattr(content, "parts", None) or []):
+                for part in getattr(content, "parts", None) or []:
                     piece = getattr(part, "text", None)
                     if piece:
                         parts.append(piece)

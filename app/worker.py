@@ -21,13 +21,13 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from app.config import Settings, get_settings
-from app.models import DocumentJob, DocumentStatus, ErrorInfo
-from app.processing import JobProcessor, LeaseLost, classify
+from app.models import DocumentJob, ErrorInfo
+from app.parsers.base import ParserError
+from app.processing import JobProcessor, LeaseLostError, classify
 from app.queue import JobQueue
 from app.registry import ProviderRegistry
 from app.storage.jobs import JobRepository
 from app.storage.objects import S3ObjectStore
-from app.parsers.base import ParserError
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +51,7 @@ class Worker:
         self._queue = queue
         self._registry = registry
         self._consumer = consumer
-        self._processor = JobProcessor(
-            settings=settings, repo=repo, store=store, registry=registry
-        )
+        self._processor = JobProcessor(settings=settings, repo=repo, store=store, registry=registry)
         self._stop = False
 
     # ── lifecycle ──────────────────────────────────────────────────────────────
@@ -116,17 +114,13 @@ class Worker:
         await self._drain(in_flight)
         logger.info("worker_stopped consumer=%s", self._consumer)
 
-    async def _run_slot(
-        self, stream_id: str, document_id: str, slots: asyncio.Semaphore
-    ) -> None:
+    async def _run_slot(self, stream_id: str, document_id: str, slots: asyncio.Semaphore) -> None:
         """One job, holding one concurrency slot for as long as it runs."""
         try:
             await self._handle(stream_id, document_id)
         except RedisError as exc:
-            logger.warning(
-                "handle_redis_error id=%s error=%s", document_id, type(exc).__name__
-            )
-        except Exception:  # noqa: BLE001 - one bad job must not kill the worker
+            logger.warning("handle_redis_error id=%s error=%s", document_id, type(exc).__name__)
+        except Exception:
             logger.exception("handle_unexpected_error id=%s", document_id)
         finally:
             slots.release()
@@ -159,7 +153,9 @@ class Worker:
                 await self._queue.ensure_group()
                 return
             except RedisError as exc:
-                logger.warning("waiting_for_redis error=%s retry_in=%.0fs", type(exc).__name__, delay)
+                logger.warning(
+                    "waiting_for_redis error=%s retry_in=%.0fs", type(exc).__name__, delay
+                )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 10.0)
 
@@ -187,7 +183,7 @@ class Worker:
         heartbeat = asyncio.create_task(self._heartbeat(document_id, token))
         try:
             await self._attempt_loop(job, stream_id=stream_id, token=token)
-        except LeaseLost:
+        except LeaseLostError:
             logger.warning("lease_lost id=%s (no state written)", document_id)
         finally:
             heartbeat.cancel()
@@ -215,7 +211,7 @@ class Worker:
             try:
                 await self._processor.process(job, token=token, stream_id=stream_id)
                 return
-            except LeaseLost:
+            except LeaseLostError:
                 raise
             except RedisError:
                 # The job store itself is unavailable. This is NOT a property of the document
@@ -228,7 +224,11 @@ class Worker:
                 retryable = exc.retryable
                 logger.warning(
                     "job_attempt_failed id=%s attempt=%d code=%s retryable=%s duration_s=%.2f",
-                    job.id, attempt, exc.code, retryable, elapsed,
+                    job.id,
+                    attempt,
+                    exc.code,
+                    retryable,
+                    elapsed,
                 )
                 if retryable and attempt < self._settings.max_job_attempts:
                     await self._repo.mark_retry(
@@ -241,7 +241,7 @@ class Worker:
                     continue
                 await self._fail(job, stream_id=stream_id, token=token, error=classify(exc))
                 return
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.exception("job_unexpected_error id=%s attempt=%d", job.id, attempt)
                 await self._fail(job, stream_id=stream_id, token=token, error=classify(exc))
                 return
@@ -276,7 +276,7 @@ class Worker:
             group=self._settings.consumer_group,
         )
         if not committed:
-            raise LeaseLost()
+            raise LeaseLostError()
         logger.info("job_failed id=%s code=%s", job.id, error.code)
         await self._store.delete_source(job.source_key)
 
@@ -290,7 +290,9 @@ class Worker:
                     logger.warning("lease_renewal_rejected id=%s", document_id)
                     return
             except RedisError as exc:
-                logger.warning("lease_renewal_error id=%s error=%s", document_id, type(exc).__name__)
+                logger.warning(
+                    "lease_renewal_error id=%s error=%s", document_id, type(exc).__name__
+                )
 
 
 def _configure_logging(level: str) -> None:

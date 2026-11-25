@@ -6,8 +6,8 @@ module may import from `app.api`, `app.storage`, `app.queue` or `app.processing`
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -15,21 +15,21 @@ from pydantic import BaseModel, Field
 
 def utc_now_iso() -> str:
     """Single timestamp format everywhere: 2026-11-25T12:00:00Z."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-class ParserId(str, Enum):
+class ParserId(StrEnum):
     PYPDF = "pypdf"
     GEMINI = "gemini"
     GPT5_MINI = "gpt-5-mini"
 
 
-class PageFormat(str, Enum):
+class PageFormat(StrEnum):
     TEXT = "text"
     MARKDOWN = "markdown"
 
 
-class DocumentStatus(str, Enum):
+class DocumentStatus(StrEnum):
     QUEUED = "queued"
     PARSING = "parsing"
     SUMMARIZING = "summarizing"
@@ -124,3 +124,20 @@ class HealthResponse(BaseModel):
     status: Literal["ok", "degraded"]
     checks: dict[str, str] = Field(default_factory=dict)
     detail: str | None = None
+
+
+class DocumentSummary(BaseModel):
+    """One row of `GET /api/v1/documents` — enough to rebuild a UI after a refresh."""
+
+    id: str
+    filename: str
+    parser: ParserId
+    status: DocumentStatus
+    page_count: int | None = None
+    created_at: str
+    status_url: str
+
+
+class DocumentList(BaseModel):
+    documents: list[DocumentSummary]
+    next_before: float | None = None

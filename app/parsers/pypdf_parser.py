@@ -14,8 +14,8 @@ from pypdf import PdfReader
 from app.models import PageFormat, PageResult, ParserId
 from app.parsers.base import (
     OcrRequiredError,
-    ParserError,
     ParseLimits,
+    ParserError,
     ParseResult,
     PermanentError,
 )
@@ -28,16 +28,12 @@ def _parse_sync(pdf: bytes, *, max_pages: int, max_chars: int) -> ParseResult:
         # `is_encrypted` is true even when an empty password would unlock the file; we never
         # prompt for a password, so any encryption is treated as unsupported input.
         if reader.is_encrypted:
-            raise PermanentError(
-                "Password-protected PDFs are not supported.", code="ENCRYPTED_PDF"
-            )
+            raise PermanentError("Password-protected PDFs are not supported.", code="ENCRYPTED_PDF")
         total_pages = len(reader.pages)
     except ParserError:
         raise
     except Exception as exc:  # corrupt xref / truncated file / not a PDF at all
-        raise PermanentError(
-            "The uploaded file is not a valid PDF.", code="INVALID_PDF"
-        ) from exc
+        raise PermanentError("The uploaded file is not a valid PDF.", code="INVALID_PDF") from exc
 
     if total_pages > max_pages:
         raise PermanentError(

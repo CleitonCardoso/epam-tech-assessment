@@ -10,7 +10,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 20 * 1024 * 1024
     max_batch_files: int = 5
     max_batch_bytes: int = 50 * 1024 * 1024
+    # Simultaneous uploads the API will buffer. Past this, requests wait briefly and get a 503
+    # with Retry-After instead of being buffered anyway (memory is the constraint).
+    max_concurrent_uploads: int = 16
+    upload_slot_timeout_seconds: float = 10.0
     max_pages: int = 50
     # Per-page Gemini calls cost latency; cap how many pages an AI parser sends.
     max_ai_pages: int = 20
@@ -106,6 +110,10 @@ class Settings(BaseSettings):
             raise ValueError("PROVIDER_MAX_CONCURRENCY must be at least 1")
         if self.provider_max_requests_per_minute < 0:
             raise ValueError("PROVIDER_MAX_REQUESTS_PER_MINUTE must be 0 (disabled) or positive")
+        if self.max_concurrent_uploads < 1:
+            raise ValueError("MAX_CONCURRENT_UPLOADS must be at least 1")
+        if self.upload_slot_timeout_seconds <= 0:
+            raise ValueError("UPLOAD_SLOT_TIMEOUT_SECONDS must be positive")
         if self.retry_after_max_seconds <= 0:
             raise ValueError("RETRY_AFTER_MAX_SECONDS must be positive")
         return self

@@ -4,17 +4,56 @@ version = "1.0.0"
 description = "Async PDF processing: upload PDFs, extract per-page content, summarize with Gemini"
 requires-python = ">=3.12"
 
-# Dependencies live in requirements.txt (runtime) and requirements-dev.txt (tests) so the
-# Docker image and a reviewer's shell resolve the exact same set. This file carries tooling
+# Dependencies live in requirements.txt / requirements-dev.txt (human-edited intent) and
+# requirements*.lock.txt (exact pins generated from the verified image with `pip freeze`).
+# The Dockerfile installs the lock files, so a build is reproducible. This file carries tooling
 # configuration only — keeping a second dependency source would let them drift.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+# The repository suite is async (the Redis client is loop-bound); no per-test decorators needed.
+asyncio_mode = "auto"
 markers = [
     "integration: requires running Redis and LocalStack (docker compose up redis localstack)",
     "e2e: end-to-end through the nginx frontend (docker compose up frontend)",
+    "repository: exercises the Redis repository/lease logic against a real Redis",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:botocore.*",
 ]
+
+# --- linting --------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = [".tmp", "frontend", "infra", "dist", ".venv"]
+# The formatter and the linter must agree on quotes, or `ruff format --check` fights the code.
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "B", "UP", "SIM", "RUF"]
+ignore = [
+    "E501",    # long lines in docstrings/comments are deliberate prose
+    "B008",    # FastAPI's Depends()/File() in defaults is the documented pattern
+    "SIM105",  # contextlib.suppress is not always clearer than try/except/pass
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+# --- typing ---------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+files = ["app"]
+# Third-party packages without stubs (botocore, google-genai) would otherwise drown the signal.
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+check_untyped_defs = true
+no_implicit_optional = true
+strict_equality = true
+warn_return_any = false
+# Tests intentionally pass wrong types to prove validation rejects them.
+exclude = ["tests/"]

@@ -1,29 +1,21 @@
 """Gemini markdown extraction: one model call per page, one page per call.
 
-Why split the PDF instead of sending the whole document in one request: page attribution must
-be deterministic. A whole-document call returns one blob and the model decides where pages
-begin, which silently mis-attributes content whenever the document has no visible page breaks.
+Why split the PDF instead of sending the whole document in one request: page attribution must be
+deterministic. A whole-document call returns one blob and the model decides where pages begin, which
+silently mis-attributes content whenever the document has no visible page breaks.
 
-The cost is honest and documented: N calls for an N-page document, which is why this parser is
-capped by MAX_AI_PAGES and runs sequentially to respect free-tier rate limits.
+The cost is honest and documented: N calls for an N-page document, which is why this parser is capped
+by MAX_AI_PAGES and paced by ProviderPacer.
 """
 
 from __future__ import annotations
 
 import asyncio
-import io
 import logging
 
-from pypdf import PdfReader, PdfWriter
-
 from app.models import PageFormat, PageResult, ParserId
-from app.parsers.base import (
-    ParseLimits,
-    ParseResult,
-    Parser,
-    PermanentError,
-    TransientError,
-)
+from app.parsers.base import ParseLimits, Parser, ParseResult, PermanentError, TransientError
+from app.parsers.pdf_pages import split_pdf_pages
 from app.providers.gemini import GeminiClient
 
 logger = logging.getLogger(__name__)
@@ -40,50 +32,6 @@ Rules:
 """
 
 EMPTY_PAGE_MARKER = "(no extractable text)"
-
-
-def _split_pages(pdf: bytes, *, max_pages: int) -> list[bytes]:
-    """Split into single-page PDFs. Blocking; called through a thread."""
-    try:
-        reader = PdfReader(io.BytesIO(pdf))
-    except Exception as exc:  # noqa: BLE001
-        raise PermanentError(
-            "The uploaded file is not a valid PDF.", code="INVALID_PDF"
-        ) from exc
-
-    if getattr(reader, "is_encrypted", False):
-        raise PermanentError(
-            "Password-protected PDFs are not supported.", code="ENCRYPTED_PDF"
-        )
-
-    try:
-        total = len(reader.pages)
-    except Exception as exc:  # noqa: BLE001
-        raise PermanentError("The PDF page tree could not be read.", code="INVALID_PDF") from exc
-
-    if total == 0:
-        raise PermanentError("The PDF contains no pages.", code="EMPTY_PDF")
-    if total > max_pages:
-        raise PermanentError(
-            f"The document has {total} pages; the AI-parser limit is {max_pages}. "
-            "Use the PyPDF parser for large documents.",
-            code="TOO_MANY_PAGES_FOR_AI",
-        )
-
-    chunks: list[bytes] = []
-    for index in range(total):
-        try:
-            writer = PdfWriter()
-            writer.add_page(reader.pages[index])
-            buffer = io.BytesIO()
-            writer.write(buffer)
-            chunks.append(buffer.getvalue())
-        except Exception as exc:  # noqa: BLE001
-            raise PermanentError(
-                f"Page {index + 1} could not be isolated for extraction.",
-                code="PAGE_SPLIT_FAILED",
-            ) from exc
-    return chunks
 
 
 class GeminiParser(Parser):
@@ -108,20 +56,17 @@ class GeminiParser(Parser):
         self._timeout = timeout_seconds
 
     async def parse(self, pdf: bytes, *, filename: str, limits: ParseLimits) -> ParseResult:
-        chunks = await asyncio.to_thread(_split_pages, pdf, max_pages=limits.max_ai_pages)
+        chunks = await asyncio.to_thread(split_pdf_pages, pdf, max_pages=limits.max_ai_pages)
 
         pages: list[PageResult] = []
         warnings: list[str] = []
 
         # Sequential on purpose: free-tier rate limits punish parallel page calls, and the
-        # ordering guarantee is then trivial to reason about.
+        # ordering guarantee is then trivial to reason about. Pacing bounds the request rate.
         for number, chunk in enumerate(chunks, start=1):
             content = await self._transcribe_page(number, chunk, limits)
             if not content:
-                content = ""
-                warnings.append(
-                    f"Page {number} produced no extractable text; it was kept empty."
-                )
+                warnings.append(f"Page {number} produced no extractable text; it was kept empty.")
             pages.append(
                 PageResult(page_number=number, format=PageFormat.MARKDOWN, content=content)
             )
@@ -139,9 +84,7 @@ class GeminiParser(Parser):
 
         part = types.Part.from_bytes(data=chunk, mime_type="application/pdf")
         try:
-            text = await self._client.generate(
-                [part, PAGE_PROMPT], timeout_seconds=self._timeout
-            )
+            text = await self._client.generate([part, PAGE_PROMPT], timeout_seconds=self._timeout)
         except TransientError:
             raise
         except PermanentError as exc:

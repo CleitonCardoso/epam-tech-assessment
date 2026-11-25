@@ -7,6 +7,11 @@ export interface DocumentCardState {
   accepted: DocumentAccepted;
   detail: DocumentDetail | null;
   pollError: string | null;
+  /**
+   * Where the card came from. `recent` cards were rebuilt from GET /api/v1/documents after a
+   * reload; upload cards leave it unset. The card component itself does not care.
+   */
+  source?: 'upload' | 'recent';
 }
 
 interface DocumentCardProps {

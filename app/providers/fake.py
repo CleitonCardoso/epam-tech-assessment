@@ -17,8 +17,8 @@ from pypdf import PdfReader
 from app.models import PageFormat, PageResult, ParserId
 from app.parsers.base import (
     OcrRequiredError,
-    ParserError,
     ParseLimits,
+    ParserError,
     ParseResult,
     PermanentError,
 )
@@ -35,16 +35,12 @@ def _count_pages(pdf: bytes, *, max_pages: int, encrypted_code: str = "ENCRYPTED
     try:
         reader = PdfReader(io.BytesIO(pdf))
         if reader.is_encrypted:
-            raise PermanentError(
-                "Password-protected PDFs are not supported.", code=encrypted_code
-            )
+            raise PermanentError("Password-protected PDFs are not supported.", code=encrypted_code)
         count = len(reader.pages)
     except ParserError:
         raise
     except Exception as exc:
-        raise PermanentError(
-            "The uploaded file is not a valid PDF.", code="INVALID_PDF"
-        ) from exc
+        raise PermanentError("The uploaded file is not a valid PDF.", code="INVALID_PDF") from exc
     if count > max_pages:
         raise PermanentError(
             f"The document has {count} pages; the limit is {max_pages}.",

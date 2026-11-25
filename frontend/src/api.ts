@@ -1,5 +1,6 @@
 import type {
   DocumentDetail,
+  DocumentListResponse,
   ParsersResponse,
   RejectedFile,
   UploadResponse,
@@ -181,4 +182,37 @@ export async function fetchDocument(id: string, signal?: AbortSignal): Promise<D
     throw new ApiError(response.status, 'Malformed document response from the API.', body);
   }
   return body as unknown as DocumentDetail;
+}
+
+/**
+ * GET /api/v1/documents: newest first. Used on mount to rebuild cards after a reload; the
+ * first page is `limit` documents and no `before` cursor. The list endpoint returns summary
+ * rows, so the caller maps them onto card state and polls the non-terminal ones as usual.
+ */
+export async function fetchRecentDocuments(
+  limit = 20,
+  before?: number | null,
+  signal?: AbortSignal,
+): Promise<DocumentListResponse> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (before !== undefined && before !== null) {
+    params.set('before', String(before));
+  }
+  const response = await fetch(`${API_BASE}/documents?${params.toString()}`, {
+    headers: { Accept: 'application/json' },
+    signal,
+  });
+  const body = await readBody(response);
+  if (!response.ok) {
+    throw new ApiError(
+      response.status,
+      describeErrorBody(body) ?? `Could not load recent documents (HTTP ${response.status})`,
+      body,
+    );
+  }
+  if (!isRecord(body)) {
+    throw new ApiError(response.status, 'Malformed document list response from the API.', body);
+  }
+  // Rows are validated by the mapping layer so one bad summary cannot blank the whole list.
+  return body as unknown as DocumentListResponse;
 }

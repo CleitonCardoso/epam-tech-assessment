@@ -17,9 +17,9 @@ from app.models import (
     DocumentJob,
     DocumentStatus,
     ErrorInfo,
-    ParserId,
     PageFormat,
     PageResult,
+    ParserId,
     utc_now_iso,
 )
 

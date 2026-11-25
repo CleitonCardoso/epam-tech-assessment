@@ -34,7 +34,7 @@ class ObjectStoreError(Exception):
 
 
 class S3ObjectStore:
-    def __init__(self, settings: "Settings") -> None:
+    def __init__(self, settings: Settings) -> None:
         self._bucket = settings.s3_bucket
         self._client = boto3.client(
             "s3",
@@ -79,7 +79,9 @@ class S3ObjectStore:
 
     async def get_source(self, key: str) -> bytes:
         try:
-            response = await asyncio.to_thread(self._client.get_object, Bucket=self._bucket, Key=key)
+            response = await asyncio.to_thread(
+                self._client.get_object, Bucket=self._bucket, Key=key
+            )
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code", "")
             missing = code in {"NoSuchKey", "404", "NotFound"}
@@ -103,7 +105,9 @@ class S3ObjectStore:
         try:
             await asyncio.to_thread(self._client.head_bucket, Bucket=self._bucket)
         except ClientError as exc:
-            code = exc.response.get("Error", {}).get("Code", "") or exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode", "")
+            code = exc.response.get("Error", {}).get("Code", "") or exc.response.get(
+                "ResponseMetadata", {}
+            ).get("HTTPStatusCode", "")
             return False, f"bucket {self._bucket!r} unreachable (HTTP {code})"
         except BotoCoreError as exc:
             return False, f"bucket {self._bucket!r} unreachable ({type(exc).__name__})"

@@ -16,7 +16,8 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
-from app.api.documents import AppContext, router as documents_router
+from app.api.documents import AppContext
+from app.api.documents import router as documents_router
 from app.config import Settings, get_settings
 from app.models import HealthResponse
 from app.registry import ProviderRegistry
@@ -49,6 +50,7 @@ async def lifespan(app: FastAPI):
         repo=JobRepository(redis, settings),
         store=S3ObjectStore(settings),
         registry=ProviderRegistry(settings),
+        upload_slots=asyncio.Semaphore(settings.max_concurrent_uploads),
     )
     app.state.ctx = ctx
 
@@ -67,9 +69,7 @@ async def lifespan(app: FastAPI):
             "No model is called."
         )
     for info in ctx.registry.describe():
-        logger.info(
-            "parser parser=%s enabled=%s note=%s", info.id.value, info.enabled, info.note
-        )
+        logger.info("parser parser=%s enabled=%s note=%s", info.id.value, info.enabled, info.note)
 
     try:
         yield
@@ -81,7 +81,6 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    settings = get_settings()
     app = FastAPI(
         title="Async PDF processing",
         version="1.0.0",
@@ -112,7 +111,7 @@ def create_app() -> FastAPI:
         try:
             await asyncio.wait_for(ctx.redis.ping(), timeout=READY_TIMEOUT_SECONDS)
             checks["redis"] = "ok"
-        except (RedisError, asyncio.TimeoutError, OSError) as exc:
+        except (TimeoutError, RedisError, OSError) as exc:
             checks["redis"] = f"unavailable: {type(exc).__name__}"
             healthy = False
 
@@ -122,7 +121,7 @@ def create_app() -> FastAPI:
             )
             checks["s3"] = s3_detail
             healthy = healthy and s3_ok
-        except (asyncio.TimeoutError, OSError) as exc:
+        except (TimeoutError, OSError) as exc:
             checks["s3"] = f"unavailable: {type(exc).__name__}"
             healthy = False
 

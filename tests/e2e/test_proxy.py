@@ -86,7 +86,7 @@ class TestApiThroughProxy:
         response = client.get(f"/api/v1/documents/{uuid.uuid4()}")
         assert response.status_code == 404, response.text
         assert response.headers["content-type"].startswith("application/json")
-        assert "id=\"root\"" not in response.text
+        assert 'id="root"' not in response.text
 
     def test_upload_and_result_through_the_proxy(self, client: httpx.Client) -> None:
         pdf = SAMPLES / "sample-text.pdf"
@@ -119,7 +119,9 @@ class TestApiThroughProxy:
 
 
 class TestProxyLimits:
-    def test_body_limit_is_generous_enough_for_the_documented_file_size(self, client: httpx.Client) -> None:
+    def test_body_limit_is_generous_enough_for_the_documented_file_size(
+        self, client: httpx.Client
+    ) -> None:
         """nginx caps bodies at 25 MB; the API accepts 20 MB. A 21 MB body must be refused by one
         of them rather than buffered and then accepted."""
         oversized = b"%PDF-1.4\n" + b"0" * (21 * 1024 * 1024)
@@ -128,4 +130,6 @@ class TestProxyLimits:
             files=[("files", ("big.pdf", oversized, "application/pdf"))],
             data={"parser": "pypdf"},
         )
-        assert response.status_code in {413}, f"expected 413 from nginx or the API, got {response.status_code}"
+        assert response.status_code in {413}, (
+            f"expected 413 from nginx or the API, got {response.status_code}"
+        )

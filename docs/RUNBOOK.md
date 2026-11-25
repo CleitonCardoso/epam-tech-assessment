@@ -33,22 +33,34 @@ Host and container names assume you run from the repository root.
   optional `test` profile.
 - **Worker throughput and pacing knobs.** The worker processes `WORKER_CONCURRENCY` jobs at once
   (default 4), reads up to `WORKER_BATCH_SIZE` entries per read (8) and drains in-flight work for
-  `WORKER_SHUTDOWN_GRACE_SECONDS` (30) on SIGTERM. AI calls are paced per process by
+  `WORKER_SHUTDOWN_GRACE_SECONDS` (30) on SIGTERM. AI calls are paced by
   `PROVIDER_MAX_CONCURRENCY` (4) and an optional requests-per-minute token bucket
-  (`PROVIDER_MAX_REQUESTS_PER_MINUTE`, `0` = disabled); `Retry-After` is honoured and clamped by
-  `RETRY_AFTER_MAX_SECONDS` (30). The full tuning table is in
+  (`PROVIDER_MAX_REQUESTS_PER_MINUTE`, `0` = disabled) - **per provider client instance**, not per
+  process, so a Gemini parse plus a Gemini summary use two pacers. `Retry-After` is honoured and
+  clamped by `RETRY_AFTER_MAX_SECONDS` (30). The full tuning table is in
   [DEVELOPING.md](DEVELOPING.md#tuning-knobs); measured effects are in
   [PERFORMANCE.md](PERFORMANCE.md).
+- **Upload protection knobs.** `MAX_CONCURRENT_UPLOADS` (default 16) bounds simultaneous uploads per
+  API process; a request waits up to `UPLOAD_SLOT_TIMEOUT_SECONDS` (10) for a slot and then gets a
+  `503` with `Retry-After: 1`. The UI proxy additionally rate-limits per client IP: 20 r/s (burst
+  40) on `/api/v1/documents` and 100 r/s (burst 200) on the rest of `/api/`, answering `429` with
+  `{"detail": "...", "code": "RATE_LIMITED"}`. Neither is authentication, and the nginx limits do
+  not apply to a direct call on `:8000`. Details: [API.md](API.md#limits).
+- **Providers and keys.** Three real parsers: `pypdf` (local), `gemini` (needs `GEMINI_API_KEY`),
+  `gpt-5-mini` (needs `OPENAI_API_KEY`). The document summary is always Gemini, so live mode needs
+  `GEMINI_API_KEY` even for pypdf and gpt-5-mini; an OpenAI-only live setup enables nothing
+  (`/api/v1/parsers` explains why). The OpenAI path is implemented but **not live-verified** here -
+  no OpenAI credentials exist in this environment.
 - Host ports are loopback-bound: API `127.0.0.1:8000`, UI `127.0.0.1:3000`, LocalStack S3
   `127.0.0.1:${LOCALSTACK_PORT:-4566}` (4566 on a clean host). Inside the Compose network the app
   and Terraform always use `localstack:4566` and `redis:6379`; the host port only matters to
   host-side tools. Read the actual mapping from `docker compose ps`.
 - Redis is **not** published to the host. All Redis inspection goes through
   `docker compose exec`.
-- `REDIS_URL`, `S3_ENDPOINT_URL`, `S3_BUCKET`, `AI_MODE`, and the limits come from `.env` when
-  present, from Compose environment passthrough, or from the defaults in `app/config.py`. Do not
-  read or print `.env`; ask the stack what it is doing via `/health/ready` and `/api/v1/parsers`
-  instead.
+- `REDIS_URL`, `S3_ENDPOINT_URL`, `S3_BUCKET`, `AI_MODE`, `GEMINI_API_KEY`, `OPENAI_API_KEY`,
+  `MAX_CONCURRENT_UPLOADS` and the limits come from `.env` when present, from Compose environment
+  passthrough, or from the defaults in `app/config.py`. Do not read or print `.env`; ask the stack
+  what it is doing via `/health/ready` and `/api/v1/parsers` instead.
 
 ## 2. Start, stop, restart
 
@@ -301,6 +313,12 @@ Per-job events to grep for:
 Logs intentionally contain no PDF bytes, no extracted page text, no prompts, and no API keys. A
 document filename may appear in the job hash but not in these log lines.
 
+Proxy-level rejections never reach the API, so they appear only in the **frontend** container log:
+nginx logs rate-limit events at error level (`limiting requests, excess: ... by zone "uploads"`),
+and the access log shows the `429`. A `503` from admission control or a disabled parser does appear
+as an API access-log line with status 503, but there is no application log line for the admission
+timeout itself - the response is the record.
+
 ## 5. Inspecting the queue and job state
 
 All commands below were **[executed]** against the live stack, read-only. Stream and group names
@@ -363,6 +381,26 @@ Observed on a completed job (**[executed]**): the hash held the 13 fields, `stat
 both about 84,000 s, i.e. the 24 h result TTL was applied at commit.
 
 Remember that missing fields encode nulls: `stage=""`, `page_count=""`, `error=""`.
+
+### Recent-documents index (`docs:index`)
+
+The list endpoint (`GET /api/v1/documents`) is backed by this sorted set: member = document id,
+score = enqueue epoch. It has **no per-key TTL**; every accepted upload prunes entries older than
+`RESULT_TTL_SECONDS`, and ids whose hash has expired are skipped when listing.
+
+```bash
+# How many documents are indexed
+docker compose exec -T redis redis-cli ZCARD docs:index
+
+# Newest 10 ids with their epoch scores
+docker compose exec -T redis redis-cli ZREVRANGE docs:index 0 9 WITHSCORES
+
+# What the list endpoint's cursor would return (strictly older than a score)
+docker compose exec -T redis redis-cli ZREVRANGEBYSCORE docs:index "(1795637732.6776729" -inf LIMIT 0 20
+```
+
+If the list looks empty or short, check `ZCARD docs:index` first, then whether the job hashes still
+exist (`HGETALL docs:job:<id>`): an index entry with an expired hash is intentionally skipped.
 
 ### S3 state
 
@@ -514,9 +552,17 @@ verify wiring, use `docker compose run --rm --no-deps --entrypoint terraform pro
 | Apply hangs for ~3 minutes then fails on a lifecycle configuration | LocalStack never confirms S3 lifecycle rules | `infra/envs/local/main.tf` | keep `enable_lifecycle = false` locally (already set); production enables it |
 | Bucket still absent after re-applying | Provisioner failed, or it manages a different bucket name | provisioner log; `S3_BUCKET` | fix and re-apply; do not create it with `awslocal s3 mb` |
 | `503` upload: `summarization is unavailable (gemini_api_key not configured)` | `AI_MODE=live` without a Gemini key; every parser is disabled by design | `curl /health/ready`; `curl /api/v1/parsers` | set `GEMINI_API_KEY` (and optionally `AI_MODE=live`) in `.env`, or `AI_MODE=fake`; then `docker compose up -d --force-recreate api worker` |
-| `503` upload: `Parser 'gpt-5-mini' is not available right now. ... not implemented in this delivery` | Expected: the adapter declares `IMPLEMENTED = False` | `GET /api/v1/parsers` | use `pypdf` or `gemini`; this is a documented gap, not a bug |
+| `503` upload: `Parser 'gpt-5-mini' is not available right now. ... OPENAI_API_KEY is not configured` | Expected in live mode without an OpenAI key: the parser is implemented but not configured | `GET /api/v1/parsers`; is `OPENAI_API_KEY` set? | set `OPENAI_API_KEY` (and `GEMINI_API_KEY`, because the summary is Gemini-only) and recreate api/worker. In fake mode the parser is a labelled stand-in and is enabled |
+| `503` upload: `summarization is unavailable (gemini_api_key not configured)` **even with `OPENAI_API_KEY` set** | Live mode needs Gemini for the summary; without it every parser is disabled by design | `curl /health/ready`; `GET /api/v1/parsers` | set `GEMINI_API_KEY`, or run `AI_MODE=fake` |
+| `429` through the UI with `{"code":"RATE_LIMITED"}` | nginx per-IP `limit_req` exceeded (20 r/s uploads / 100 r/s api, burst 40/200) | `docker compose logs --tail=50 frontend` (rate-limit messages + access log); `grep -n limit_req frontend/nginx.conf` | back off / retry; for a legitimate client raise the zone rate or burst in the **http context** of `frontend/nginx.conf`; direct `:8000` is not proxy-limited |
+| `503` upload: `The server is at its concurrent-upload limit (MAX_CONCURRENT_UPLOADS=16). Retry shortly.` | Admission control: 16 uploads already buffering; the request waited 10 s for a slot | response headers (`Retry-After: 1`); `docker compose logs --tail=50 api` | retry; raise `MAX_CONCURRENT_UPLOADS`/`UPLOAD_SLOT_TIMEOUT_SECONDS` in `.env` only if the host has memory headroom (uploads are buffered before the S3 write) |
+| `GET /api/v1/documents` returns `503` | Redis unavailable (the only dependency of the list endpoint) | `curl /health/ready`; `docker compose ps redis` | restart/wait for Redis; the list is an index, the detail endpoint has the same dependency |
+| List is empty or shorter than expected although documents exist | `docs:index` pruned/absent, or the job hashes expired | `ZCARD docs:index`; `HGETALL docs:job:<id>`; [section 5](#5-inspecting-the-queue-and-job-state) | expected after the 24 h retention; index entries with expired hashes are skipped. Old lists may look short until new uploads prune the index |
+| Frontend container crash-loops with `"limit_req_zone" directive is not allowed here` | `limit_req_zone` was moved inside `server {}`; it is only legal in the http context | `docker compose logs frontend`; `frontend/nginx.conf` | keep the two `limit_req_zone` lines and `limit_req_status` outside the `server` block (the file is included inside `http {}`) |
+| CI quality job fails on `ruff` / `ruff format --check` / `mypy` / encoding | A style, type or non-UTF-8 regression | run the same commands locally (section 12); `python scripts/check_encoding.py` | fix the code or the encoding; do not disable the gate. `ruff format` is the authority for formatting |
+| `pip` complains that a lock and intent disagree, or CI resolves different versions | `requirements*.txt` changed without regenerating the lock files | `git diff requirements*.txt requirements*.lock.txt`; Dockerfile comment | regenerate both lock files from the verified image (section 12) and rebuild |
 | Gemini jobs fail `PROVIDER_TIMEOUT` / `PROVIDER_ERROR` after retries | Provider congestion (the mandated `gemini-3.1-flash-lite` returned `503 UNAVAILABLE` during development), wrong model id, or exhausted quota | worker logs `job_attempt_failed`; `PROVIDER_CONFIG` vs transient code | for a demo, set `GEMINI_MODEL=gemini-flash-lite-latest` in `.env` and recreate; leave the default as the brief's id otherwise |
-| `PROVIDER_CONFIG` | Wrong/renamed model or bad key | worker log for the attempt; provider status | correct `GEMINI_MODEL`/`GEMINI_API_KEY`; the code never silently substitutes a model |
+| `PROVIDER_CONFIG` | Wrong/renamed model or bad key (Gemini 4xx, or OpenAI 401/403/unknown model) | worker log for the attempt; provider status | correct `GEMINI_MODEL`/`GEMINI_API_KEY` or `OPENAI_MODEL`/`OPENAI_API_KEY`; the code never silently substitutes a model |
 | Upload rejected `422 NOT_A_PDF` although the file opens in a reader | The uploaded bytes do not start with `%PDF-` (the check is on raw bytes, not extension/MIME) | `Format-Hex -Path file.pdf -Count 8` (PowerShell) or `head -c 5 file.pdf` | re-export/download the original file; do not send a proxy-generated preview |
 | Upload `422 EMPTY_FILE` | Zero bytes were received | file size locally | re-upload the file |
 | `413` through `:3000` for a large batch, but `:8000` accepts each file | nginx caps bodies at 25 MB | `frontend/nginx.conf` `client_max_body_size` | raise the nginx cap, or upload directly to the API, or split the batch |
@@ -595,3 +641,69 @@ It exits non-zero if any check fails, so it can also be used as a gate. Recorded
 5/5, redis 3/3 (30/30 completed, 0 lost), fencing 6/6. Scenario B is what found the
 transient-Redis-error misclassification that is now fixed and logged as
 `job_deferred_redis_unavailable`.
+
+## 12. Test suites and quality gates
+
+Full inventory and per-test descriptions: [TESTING.md](TESTING.md). Current counts: **82 backend
+checks** run by default (44 unit, 16 API integration, 14 repository/lease, 8 proxy e2e) plus **4
+opt-in** (3 concurrency, 1 live AI), plus 29 frontend vitest tests.
+
+```bash
+# 44 unit tests, offline (no Redis/S3/API)
+docker compose --profile test run --rm test
+
+# 16 API integration tests (needs the stack; samples mount required)
+docker compose --profile test run --rm \
+  -e API_BASE_URL=http://api:8000 \
+  -v "$(pwd)/samples:/app/samples:ro" \
+  test python -m pytest tests/integration/test_api.py -m integration -q
+
+# 14 repository/lease tests (needs Redis only; the readiness wait is not autouse any more)
+docker compose --profile test run --rm \
+  -e REDIS_URL=redis://redis:6379/0 \
+  test python -m pytest tests/integration/test_repository.py -m repository -q
+
+# 8 proxy e2e tests (needs the frontend service too)
+docker compose --profile test run --rm \
+  -e FRONTEND_URL=http://frontend:80 \
+  -v "$(pwd)/samples:/app/samples:ro" \
+  test python -m pytest tests/e2e -m e2e -q
+
+# Opt-in load suites (3 concurrency tests need a disposable fake-mode worker, see section 11;
+# the 1 live-AI test needs AI_MODE=live + a real GEMINI_API_KEY + RUN_LIVE_AI_TESTS=1)
+docker compose --profile test run --rm \
+  -e API_BASE_URL=http://api:8000 -e RUN_CONCURRENCY_TESTS=1 \
+  -v "$(pwd)/samples:/app/samples:ro" \
+  test python -m pytest tests/integration/test_concurrency.py -q
+```
+
+`asyncio_mode = "auto"` is set in `pyproject.toml` (the repository suite is async); markers are
+`integration`, `e2e` and `repository`. The Compose `test` profile's baked-in command is still
+`pytest -q -m "not integration"`, which excludes repository and e2e because both also carry the
+`integration` marker.
+
+Quality gates (also the six CI jobs in `.github/workflows/ci.yml`: quality, unit, integration+e2e,
+frontend, terraform; the quality job runs lint, format, types, secret grep and encoding):
+
+```bash
+# In the test image (ruff + mypy are dev dependencies)
+docker run --rm -v "$PWD:/src" -w /src <test-image> ruff check .
+docker run --rm -v "$PWD:/src" -w /src <test-image> ruff format --check .
+docker run --rm -v "$PWD:/src:ro" -w /src <test-image> mypy --cache-dir=/tmp/mypy
+
+# On the host (stdlib only)
+python scripts/check_encoding.py        # fails on any non-UTF-8 text file
+```
+
+Lock files: the Dockerfile installs `requirements.lock.txt` (and
+`requirements-dev.lock.txt` for the test profile); `requirements*.txt` are the human-edited intent.
+Regenerate after changing the intent, from the verified image (the command is in the Dockerfile
+comment):
+
+```bash
+docker run --rm --entrypoint pip <image> freeze | grep '==' | sort > requirements.lock.txt
+# and the dev variant from an INSTALL_DEV=1 image -> requirements-dev.lock.txt
+```
+
+CI runs with `AI_MODE=fake` and no provider credentials, so nothing in the pipeline claims to
+exercise a live model.
