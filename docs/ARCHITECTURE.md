@@ -18,25 +18,15 @@ Infrastructure is code: `infra/` is a Terraform tree applied by a one-shot Compo
 reviewer never installs Terraform - `hashicorp/terraform:1.9` runs inside a container. Startup
 order is enforced with `depends_on`:
 
-```text
-docker compose up --build -d
-  |
-  +-- redis         (healthy)
-  +-- localstack    (healthy; S3 API only, no bucket yet)
-  |       |
-  |       v
-  +-- provisioner   one-shot, working_dir /tf/envs/local, ./infra mounted at /tf
-  |       |         terraform init -backend=false
-  |       |         terraform apply -auto-approve -input=false
-  |       |         terraform output -raw bucket_name
-  |       |
-  |       `-- api and worker wait for it with
-  |           `condition: service_completed_successfully`
-  v
-  api  +  worker   (start only after the provisioner exits 0)
-  |
-  v
-  frontend
+```mermaid
+flowchart TD
+    UP["docker compose up --build -d"]
+    UP --> REDIS["redis (healthy)"]
+    UP --> LS["localstack (healthy, S3 API only, no bucket yet)"]
+    LS --> PROV["provisioner (one-shot)<br/>working_dir /tf/envs/local, ./infra mounted at /tf<br/>terraform init -backend=false<br/>terraform apply -auto-approve -input=false<br/>terraform output -raw bucket_name"]
+    PROV -->|"api and worker wait: condition service_completed_successfully"| APIW["api + worker (start only after the provisioner exits 0)"]
+    REDIS --> APIW
+    APIW --> FE["frontend"]
 ```
 
 - The provisioner is a one-shot service (`restart: "no"`, `TF_IN_AUTOMATION=1`). While it runs,
@@ -132,41 +122,22 @@ provisioner no published port (one-shot)
 
 ## 2. Request path
 
-```text
-browser (React :3000)
-  |
-  | same-origin fetch: /api/v1/...
-  v
-nginx (frontend container :80) -- /api/ and /health/ --> api:8000
-  |   limit_req: 20 r/s per IP on /api/v1/documents (uploads+list),
-  |              100 r/s per IP on the rest of /api/; JSON 429 on excess
-  |
-  |  POST /api/v1/documents  (multipart: parser + repeated files)
-  v
-api (FastAPI :8000)
-  |-- admission: wait up to 10 s for one of MAX_CONCURRENT_UPLOADS slots (else 503 + Retry-After)
-  |-- validate: parser known + enabled, bounded read, %PDF- signature, limits
-  |-- PUT s3://documents/uploads/<uuid>/source.pdf
-  |-- MULTI { HSET docs:job:<uuid> ..., XADD docs:jobs * document_id <uuid>,
-  |           ZADD docs:index <epoch> <uuid> }   (also prunes the index to the retention window)
-  `-- 202 {documents:[...], rejected:[...]}
-
-  GET /api/v1/documents?limit=&before=  -> ZREVRANGEBYSCORE docs:index + HGETALL per id
-                                           -> 200 {documents:[...], next_before}
-                                     |
-                                     |  Redis Stream docs:jobs (field: document_id only)
-                                     v
-                              worker (same image, python -m app.worker)
-                                |-- XREADGROUP group=document-workers count=WORKER_BATCH_SIZE block=2s
-                                |-- dispatch up to WORKER_CONCURRENCY jobs; stop reading when full
-                                |-- per job: SET NX PX docs:lease:<uuid>  (own execution token)
-                                |-- GET s3://documents/uploads/<uuid>/source.pdf
-                                |-- parse (PyPDF in a thread; Gemini or GPT-5 Mini, one call/page)
-                                |-- SET docs:pages:<uuid> + status=summarizing   (checkpoint)
-                                |-- summarize with Gemini (one call, whole document)
-                                `-- WATCH/MULTI fenced commit:
-                                      status=completed, TTLs on job/pages/summary,
-                                      XACK + XDEL the stream entry
+```mermaid
+flowchart TD
+    B["browser (React :3000)"] -->|"same-origin fetch /api/v1/..."| NG["nginx (frontend container :80)<br/>limit_req: 20 r/s uploads, 100 r/s other /api, JSON 429"]
+    NG -->|"POST /api/v1/documents (multipart: parser + repeated files)"| API["api (FastAPI :8000)"]
+    API --> ADM["admission: wait up to 10 s for a MAX_CONCURRENT_UPLOADS slot, else 503 + Retry-After"]
+    ADM --> VAL["validate: parser known + enabled, bounded read, %PDF- signature, limits"]
+    VAL -->|"PUT s3://documents/uploads/<uuid>/source.pdf"| S3["LocalStack S3"]
+    VAL -->|"MULTI: HSET docs:job + XADD docs:jobs + ZADD docs:index (prunes to retention window)"| R["Redis 7"]
+    VAL -.->|"202 {documents, rejected}"| B
+    R -->|"Stream docs:jobs (field: document_id only)"| W["worker (python -m app.worker)"]
+    W -->|"XREADGROUP count=WORKER_BATCH_SIZE; XAUTOCLAIM when idle; dispatch up to WORKER_CONCURRENCY"| LEASE["per job: SET NX PX docs:lease (own execution token)"]
+    LEASE -->|"GET s3://documents/uploads/<uuid>/source.pdf"| S3
+    LEASE --> PARSE["parse: PyPDF in a thread; Gemini or GPT-5 Mini, one call per page"]
+    PARSE --> CKPT["checkpoint: SET docs:pages + status=summarizing"]
+    CKPT --> SUM["summarize with Gemini (one call, whole document)"]
+    SUM --> COMMIT["WATCH/MULTI fenced commit: status=completed, TTLs, XACK + XDEL"]
 ```
 
 The API phase is bounded by upload size (max 20 MB per file) and by the admission semaphore, not by

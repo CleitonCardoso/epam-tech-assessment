@@ -14,29 +14,15 @@ LocalStack S3 for source PDFs, PyPDF and Google Gemini for extraction, React UI 
 
 ## Architecture
 
-```text
-                       ┌──────────────────────────────────────────────┐
-  React UI :3000 ──────▶│ nginx  /api/*  →  api:8000                    │
-  curl / Swagger  ─────▶└──────────────────────────────────────────────┘
-                                        │
-                             ┌──────────▼───────────┐
-                             │  api  (FastAPI)      │  validate → upload → enqueue
-                             │  uvicorn :8000       │  never parses, never calls AI
-                             └───────┬──────┬───────┘
-                     PUT source.pdf  │      │ MULTI: HSET job + XADD
-                                     ▼      ▼
-                        ┌──────────────┐  ┌──────────────────┐
-                        │ LocalStack   │  │ Redis 7          │
-                        │ S3 :4566     │  │ state + Stream   │
-                        └──────▲───────┘  └────────┬─────────┘
-                               │ GET source.pdf    │ XREADGROUP / XAUTOCLAIM
-                        ┌──────┴───────────────────▼─────────┐
-                        │  worker  (same image, other CMD)    │
-                        │  lease → parse → checkpoint →       │
-                        │  summarize → fenced commit → ACK    │
-                        └───────────────┬────────────────────┘
-                                        │
-                             PyPDF (local) │ Gemini (per page + summary)
+```mermaid
+flowchart TB
+    UI["React UI :3000<br/>curl / Swagger"] --> NG["nginx (proxies /api/*)"]
+    NG -->|"/api/*"| API["api (FastAPI) :8000<br/>validate → upload → enqueue<br/>never parses, never calls AI"]
+    API -->|"PUT source.pdf"| S3["LocalStack S3 :4566"]
+    API -->|"MULTI: HSET job + XADD"| REDIS["Redis 7 (state + Stream)"]
+    S3 -->|"GET source.pdf"| W["worker (same image, other CMD)<br/>lease → parse → checkpoint<br/>summarize → fenced commit → ACK"]
+    REDIS -->|"XREADGROUP / XAUTOCLAIM"| W
+    W --> P["PyPDF (local) / Gemini<br/>(per page + summary)"]
 ```
 
 Two processes, one image. Redis is the only job state; the stream carries a `document_id`
@@ -49,14 +35,15 @@ The bucket is **provisioned by Terraform**, and you never install Terraform: a o
 *before* the API and worker start. `docker compose up` is therefore the whole story — images,
 LocalStack, and infrastructure.
 
-```text
-infra/
-├── versions.tf              required_version + provider pin
-├── modules/
-│   └── s3/                  bucket, public-access block, versioning, optional lifecycle
-├── envs/
-│   ├── local/               same module, provider pointed at LocalStack  <- applied by compose
-│   └── prod/                real AWS: S3 + EC2 app host + IAM + Elastic IP
+```mermaid
+flowchart TB
+    INFRA["infra/"]
+    INFRA --> VERSIONS["versions.tf<br/>required_version + provider pin"]
+    INFRA --> MODULES["modules/"]
+    MODULES --> S3M["s3/<br/>bucket, public-access block, versioning, optional lifecycle"]
+    INFRA --> ENVS["envs/"]
+    ENVS --> LOCAL["local/<br/>same module, provider pointed at LocalStack<br/>(applied by compose)"]
+    ENVS --> PROD["prod/<br/>real AWS: S3 + EC2 app host + IAM + Elastic IP"]
 ```
 
 **What Compose does on `up`:** `localstack` → `provisioner` (init + apply + print the bucket name)
