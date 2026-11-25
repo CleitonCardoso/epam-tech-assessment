@@ -1,6 +1,7 @@
 # Review of the ChatGPT implementation plan — and the decisions I made
 
-Reviewed against `BWAI2.1 test task.docx` (the actual brief) and the 2-hour constraint.
+Reviewed against `BWAI2.1 test task.docx` (the actual brief; kept in the private notes repo, not
+shipped) and the 2-hour constraint.
 
 ## Verdict
 

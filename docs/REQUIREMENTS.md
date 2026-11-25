@@ -1,6 +1,7 @@
 # Requirements traceability
 
-Audit of the delivered project against `BWAI2.1 test task.docx` (3 pages).
+Audit of the delivered project against `BWAI2.1 test task.docx` (3 pages; kept in the private notes
+repo, not shipped).
 
 Status vocabulary, used strictly:
 

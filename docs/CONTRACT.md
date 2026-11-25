@@ -3,7 +3,9 @@
 Everything in this file is frozen. If an implementation needs it changed, stop and report;
 do not change it silently, because another agent is already building against it.
 
-Source of truth for the assessment: `BWAI2.1 test task.docx` (3 pages).
+Source of truth for the assessment: `BWAI2.1 test task.docx` (3 pages). The brief, the job
+description and the interview preparation are kept in a separate private notes repository and are
+**not** part of this delivery — deliberately, so the archive stays self-contained.
 Design review and deviations from the ChatGPT plan: `docs/DECISIONS.md`.
 Live status: `docs/PROGRESS.md`.
 
