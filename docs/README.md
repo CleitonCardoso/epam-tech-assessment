@@ -19,11 +19,12 @@ A minimal path through the evidence, in this order:
 3. [DECISIONS.md](DECISIONS.md) - what was changed from the original plan and the reason for
    each change. (1 min)
 4. [REQUIREMENTS.md](REQUIREMENTS.md) - the brief traced line by line, including the named gaps
-   (`gpt-5-mini` not implemented; UI verified over HTTP only). (2 min)
+   (`gpt-5-mini` implemented but not live-verified; UI verified at component/proxy level, not in a
+   browser). (2 min)
 
 If you want depth instead of breadth after that, pick one: [API.md](API.md) for the HTTP
-contract, [ARCHITECTURE.md](ARCHITECTURE.md) for the queue/lease design and the Terraform tree,
-[TESTING.md](TESTING.md) for what the test suites do and do not prove, or
+contract, [ARCHITECTURE.md](ARCHITECTURE.md) for the queue/lease design, provider matrix and the
+Terraform tree, [TESTING.md](TESTING.md) for what the test suites do and do not prove, or
 [PERFORMANCE.md](PERFORMANCE.md) for the measured load and fault-injection campaign (throughput,
 latency, pacing, crash recovery, fencing) with reproduction commands.
 
@@ -70,13 +71,13 @@ every other document quotes for throughput, latency and fault-tolerance numbers.
 
 | Document | One-line purpose |
 |---|---|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Components, provisioning/startup order, request path, job state machine, Redis keys, S3 layout, lease/fencing rationale, worker concurrency and provider pacing. |
-| [API.md](API.md) | Every endpoint, exact JSON shapes, status codes, the real error-code table, curl examples, limits. |
-| [RUNBOOK.md](RUNBOOK.md) | Operating the stack: health checks, logs, queue inspection, stuck-vs-saturated diagnosis, load/fault harnesses, reset paths, troubleshooting. |
-| [TESTING.md](TESTING.md) | Test inventory (28 unit, 13 integration, 4 opt-in), what each layer proves, exact commands, fixtures, and what is not covered. |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Components, provisioning/startup order, request path, job state machine, Redis keys (including `docs:index`), S3 layout, lease/fencing rationale, worker concurrency, provider matrix (PyPDF + Gemini + GPT-5 Mini) and pacing, admission control and proxy rate limits. |
+| [API.md](API.md) | Every endpoint (upload, list/pagination, detail, parsers, health), exact JSON shapes, status codes incl. `429`/admission `503`, the real error-code table, curl examples, limits and protection layers. |
+| [RUNBOOK.md](RUNBOOK.md) | Operating the stack: health, logs, queue/index inspection, stuck-vs-saturated diagnosis, load/fault harnesses, test commands, lock regeneration, reset paths, troubleshooting. |
+| [TESTING.md](TESTING.md) | Test inventory (44 unit, 16 API integration, 14 repository/lease, 8 proxy e2e, 4 opt-in, 29 frontend), what each layer proves, exact commands, fixtures, and what is not covered. |
 | [PERFORMANCE.md](PERFORMANCE.md) | Measured throughput/latency under load, worker-concurrency scaling, provider pacing, and the results of the three fault-injection scenarios - with the commands to reproduce them. |
-| [SECURITY.md](SECURITY.md) | Honest threat model for a trusted local demo, including cost/abuse blast radius, and what a production deployment would require. |
-| [DEVELOPING.md](DEVELOPING.md) | How to add a parser or endpoint, how to change limits and tuning knobs safely, module responsibilities, conventions. |
+| [SECURITY.md](SECURITY.md) | Honest threat model for a trusted local demo, including the listing endpoint's enumeration surface, per-IP rate limits/admission as blast-radius controls, cost/abuse, and what production would require. |
+| [DEVELOPING.md](DEVELOPING.md) | How to add a parser (two worked provider examples) or endpoint, how to change limits/tuning knobs safely, module responsibilities, quality gates and lock regeneration, conventions. |
 
 ## Optional background (now genuinely related to the infra layer)
 
@@ -99,13 +100,33 @@ re-verified against this repository.
 | `scripts/stress.py` | Load harness: bounded concurrent uploads, polls to terminal, exits non-zero on any failure. Needs the test image plus `scripts/` and `samples/` mounts | yes - creates documents (they expire) |
 | `scripts/resilience.sh` | Destructive fault injection: SIGKILLs workers, restarts Redis, pauses a worker to test fencing | **no** - run it against a stack you can recreate |
 | `scripts/make_samples.py` | Generates the deterministic PDF fixtures | yes - no state touched |
+| `scripts/check_encoding.py` | CI quality gate: every text file must be valid UTF-8 | yes - read-only |
 | `scripts/package.py` | Builds and verifies the delivery archive | yes - writes `dist/` |
 
 Usage for the harnesses is in [RUNBOOK.md](RUNBOOK.md) (operating) and
 [PERFORMANCE.md](PERFORMANCE.md) (method and measured results).
 
+## Quality gates and CI
+
+Five CI jobs in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml): **quality** (ruff lint,
+ruff format check, mypy, credential-shaped-secret grep, UTF-8 encoding gate), **unit** (44 offline
+tests), **integration** (16 API + 14 repository/lease + 8 proxy e2e against a fake-mode stack),
+**frontend** (`npm ci`, `tsc`, `npm run build`, 29 vitest tests), and **terraform**
+(`fmt -check` + `validate` for both environments). CI runs with `AI_MODE=fake` and no provider
+credentials, so nothing in the pipeline pretends to exercise a live model. Dependency builds use
+the committed `requirements*.lock.txt` files, generated from the verified images with `pip freeze`.
+
+Local commands for every gate are in [RUNBOOK.md](RUNBOOK.md) section 12 and
+[DEVELOPING.md](DEVELOPING.md). The repository root README has the same table under "Quality gates".
+
+## How to read the claims in these documents
+
 - A statement is traceable to one of: source code under `app/`, the Terraform tree under `infra/`,
-  the test suite, or a command executed in this environment on 2026-11-25.
+  the test suites, the CI workflow, or a command executed in this environment on 2026-11-25.
+- Test counts are the current suite: **82 backend checks run by default** (44 unit + 16 API + 14
+  repository + 8 e2e), **4 opt-in** (3 concurrency + 1 live), and **29 frontend vitest tests**.
+  Counts were verified by collection in this pass and are stated per suite in
+  [TESTING.md](TESTING.md).
 - Throughput, latency, memory and fault-tolerance numbers are quoted from
   [PERFORMANCE.md](PERFORMANCE.md), which states the method and reproduction commands; they are not
   re-derived in the derived documents.
@@ -119,14 +140,17 @@ Usage for the harnesses is in [RUNBOOK.md](RUNBOOK.md) (operating) and
 ## Repository layout relative to this directory
 
 ```text
-README.md          repository entry point (quickstart, API summary, limits, performance, production path)
+README.md          repository entry point (quickstart, API summary, limits, performance, quality gates, production path)
 docs/              this directory (authoritative + derived documents + measured report)
-app/               FastAPI API and worker processes (shared code; worker dispatches jobs concurrently)
-frontend/          React UI + nginx (proxies /api to the API)
+app/               FastAPI API and worker processes (shared code; concurrent worker; 3 parsers)
+frontend/          React UI + nginx (proxies /api, per-IP rate limits) + vitest tests
 infra/             Terraform: versions.tf, modules/ (s3, ec2-app), envs/ (local, prod)
-tests/             unit (contract + hardening) + integration (default + opt-in concurrency/live)
+tests/             unit (contract + hardening + openai) + integration (API + repository/lease +
+                   opt-in concurrency/live) + e2e (proxy)
 samples/           three deterministic PDF fixtures
-scripts/           make_samples.py, smoke.sh, stress.py, resilience.sh, package.py
+scripts/           make_samples.py, smoke.sh, stress.py, resilience.sh, check_encoding.py, package.py
+.github/workflows/ ci.yml: quality, unit, integration, frontend, terraform (5 jobs)
+requirements*.txt  human-edited intent; requirements*.lock.txt exact pins from the verified images
 compose.yaml       redis, localstack, provisioner (one-shot Terraform), api, worker, frontend, test profile
 compose.prod.yaml  production host topology: redis + api + worker + frontend, no LocalStack/provisioner
 ```

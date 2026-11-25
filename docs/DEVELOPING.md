@@ -15,29 +15,39 @@ components were built against those interfaces in parallel. Everything here assu
 | `app/models.py` | Wire + internal models, enums, `utc_now_iso()` | pydantic only | Must not import `app.api`, `app.storage`, `app.queue`, or `app.processing`. Shared by both processes. |
 | `app/parsers/base.py` | `Parser`/`Summarizer` protocols, `ParseLimits`, `ParseResult`, `ParserError`/`PermanentError`/`TransientError`/`OcrRequiredError`, `validate_pages` | `app.models` | Frozen contract. The worker only talks to these types. |
 | `app/parsers/pypdf_parser.py` | Real PyPDF text extraction, off the event loop | pypdf, base, models | Returns `PageFormat.TEXT`; empty pages are kept to preserve numbering. |
-| `app/parsers/gemini_parser.py` | Per-page PDF splitting + one model call per page | pypdf, providers/gemini, base | Returns `PageFormat.MARKDOWN`; capped by `MAX_AI_PAGES`; sequential calls. |
-| `app/parsers/openai_parser.py` | Declaration only, `IMPLEMENTED = False` | base, models | The registry reads the flag and disables the parser with a reason. |
-| `app/providers/gemini.py` | The only module that touches `google-genai`: `GeminiClient` (timeout + error mapping), `GeminiSummarizer` (one document summary) | google-genai, base, models | Vendor SDK types never escape this module. |
+| `app/parsers/gemini_parser.py` | One model call per page via the shared splitter | pypdf splitter, providers/gemini, base | Returns `PageFormat.MARKDOWN`; capped by `MAX_AI_PAGES`; sequential within a document. |
+| `app/parsers/openai_parser.py` | GPT-5 Mini: one Responses-API call per page via the shared splitter | pdf_pages, providers/openai_adapter, base | Returns `PageFormat.MARKDOWN`; same contract as the Gemini parser; enabled only when `OPENAI_API_KEY` is set (and a Gemini key is configured for the summary). |
+| `app/parsers/pdf_pages.py` | Shared page splitter for the AI parsers: split, encryption/invalid/zero-page/page-cap checks | pypdf, base | Deterministic page attribution lives here, not duplicated per provider. |
+| `app/providers/openai_adapter.py` | The only module that touches the OpenAI SDK: Responses API with one inline-PDF page per request, error mapping (`429`/`5xx` -> transient + `Retry-After`, `401/403/4xx` -> `PROVIDER_CONFIG`, empty -> `PROVIDER_EMPTY_RESPONSE`) | openai SDK, pacing, base | Vendor SDK types never escape; live call not verified (no key here). |
+| `app/providers/pacing.py` | `ProviderPacer`: semaphore + token bucket shared by every provider client | asyncio only | Per client instance, not per process. |
+| `app/providers/gemini.py` | The only module that touches `google-genai`: `GeminiClient` (timeout, error mapping, pacer), `GeminiSummarizer` (one document summary) | google-genai, pacing, base, models | Vendor SDK types never escape this module. |
 | `app/providers/fake.py` | Deterministic, network-free `FakeParser`/`FakeSummarizer` + `FAKE_WARNING` | pypdf (page count), base, models | Used only when `AI_MODE=fake`; output depends only on input. |
 | `app/registry.py` | Decides which parsers/summarizer exist and are enabled, and why not; `ParserUnavailable`; `describe()` for the API | config type only, parsers, providers | The only place that decides availability. The API reports its decision verbatim. |
 | `app/storage/objects.py` | Four-operation S3 adapter (`put_source`, `get_source`, `delete_source`, `healthy`) | boto3, config type | boto3 is blocking, so every call runs in a thread. Generated keys only. |
-| `app/storage/jobs.py` | Redis repository: keys, atomic create+enqueue, reads, lease acquire/renew/release (Lua), fenced stage/pages/terminal writes, TTLs | redis, models, config type | The only place that writes job state. Fencing lives here. |
+| `app/storage/jobs.py` | Redis repository: keys (including the `docs:index` sorted set), atomic create+enqueue+index, reads/list/pagination, lease acquire/renew/release (Lua), fenced stage/pages/terminal writes, TTLs | redis, models, config type | The only place that writes job state or the index. Fencing lives here. |
 | `app/queue.py` | Consumer-group operations: ensure group, read new, stale claim, ack+delete, pending diagnostics | redis, config type | Single-group assumption is load-bearing (XDEL after XACK). |
 | `app/processing.py` | One job: deadline check, resume-from-checkpoint, extract, checkpoint, summarize, fenced commit, source delete; `classify()` maps exceptions to `ErrorInfo` | models, base, registry, storage | Every state write goes through the fenced repository. |
 | `app/worker.py` | Process entrypoint: bounded concurrent dispatch (`WORKER_CONCURRENCY` slots), per-job lease + heartbeat, attempt/backoff loop with `Retry-After`/jitter, SIGTERM drain, logging setup | everything above | Serve HTTP; share mutable state between jobs; treat a `RedisError` as a document failure. |
-| `app/api/documents.py` | `POST /api/v1/documents`, `GET /api/v1/documents/{id}`, `GET /api/v1/parsers`; `AppContext` dependency | registry, storage, models, config | Never parses and never calls a model. |
+| `app/api/documents.py` | `POST /api/v1/documents` (admission control + upload), `GET /api/v1/documents` (list/pagination), `GET /api/v1/documents/{id}`, `GET /api/v1/parsers`; `AppContext` dependency | registry, storage, models, config | Never parses and never calls a model. |
 | `app/main.py` | App factory, lifespan (Redis client, repository, S3 store, registry), health endpoints, `/` redirect, app-level `RedisError` handler | api, registry, storage, config, models | No blocking work in handlers. |
-| `frontend/src/` | React UI: `api.ts` (relative `/api/v1` calls), `types.ts`, `App.tsx`, `hooks/useDocumentPolling.ts` (1.5 s poll, stops on terminal), `components/MarkdownView.tsx` (sanitized markdown) | - | No key, no API hostname, no secrets in the bundle. |
-| `tests/unit/test_contract.py` | Offline contract/settings tests | app.config, app.models | Must stay offline (no Redis/S3/HTTP). |
-| `tests/unit/test_hardening.py` | Offline regression tests for `Retry-After` parsing/clamping, provider error mapping and the retry-delay policy | app.config, app.parsers.base, app.providers.gemini, app.worker | Must stay offline; no token-bucket timing. |
-| `tests/integration/test_api.py` | Black-box HTTP acceptance tests | helpers in `tests/conftest.py` | Needs the running stack; samples mounted. |
-| `tests/integration/test_concurrency.py` | Opt-in burst/load acceptance tests (`RUN_CONCURRENCY_TESTS=1`) | same helpers | Destructive-ish (20-doc bursts); use a disposable fake-mode worker. |
-| `tests/integration/conftest.py` | Session client, readiness gate, `ai_mode` | - | Fixtures that need a live stack live here, not in `tests/conftest.py`. |
+| `frontend/src/` | React UI: `api.ts` (relative `/api/v1` calls incl. list envelope), `types.ts`, `App.tsx`, `recentDocuments.ts` (rebuild cards after refresh), `polling.ts`/`hooks/useDocumentPolling.ts` (1.5 s poll, backoff, stops on terminal), `status.ts`, `components/MarkdownView.tsx` (sanitized markdown); vitest tests beside the modules | - | No key, no API hostname, no secrets in the bundle. |
+| `tests/unit/test_contract.py` | Offline contract/settings tests (14) | app.config, app.models | Must stay offline (no Redis/S3/HTTP). |
+| `tests/unit/test_hardening.py` | Offline regression tests for `Retry-After` parsing/clamping, provider error mapping, retry-delay policy and admission settings (17) | app.config, app.parsers.base, app.providers.gemini, app.worker | Must stay offline; no token-bucket timing. |
+| `tests/unit/test_openai_parser.py` | GPT-5 Mini payload/error-mapping/parser contract against a stub (13) | app.parsers.openai_parser, app.providers.openai_adapter | No live call; monkeypatches the SDK client. |
+| `tests/integration/test_api.py` | Black-box HTTP acceptance tests (16) | helpers in `tests/conftest.py` | Needs the running stack; samples mounted. |
+| `tests/integration/test_repository.py` | Repository/lease/fenced-commit tests against a real Redis (14) | app.storage.jobs, app.queue | Marker `repository`; unique streams per test, never flushes. |
+| `tests/integration/test_concurrency.py` | Opt-in burst/load acceptance tests (`RUN_CONCURRENCY_TESTS=1`, 3) | same helpers | Destructive-ish (20-doc bursts); use a disposable fake-mode worker. |
+| `frontend/src/*.test.ts(x)` | Vitest unit/component tests (29) | - | `npm test` in `frontend/`. |
+| `tests/e2e/test_proxy.py` | Proxy-level end-to-end tests through nginx (8) | - | Marker `e2e`; needs the frontend service; `FRONTEND_URL`. |
+| `tests/integration/conftest.py` | Session client (readiness wait lives here, not autouse) and `ai_mode` | - | Fixtures that need a live stack live here, not in `tests/conftest.py`. |
 | `scripts/make_samples.py` | Deterministic sample PDFs (stdlib only) | - | Byte-identical regeneration. |
 | `scripts/smoke.sh` | Reviewer end-to-end walkthrough with assertions | - | bash + curl only. |
 | `scripts/stress.py` | Load harness: bounded concurrent uploads, polls to terminal, exits non-zero on failure | httpx (test image) | Not a pytest test; needs `scripts/` + `samples/` mounts. |
 | `scripts/resilience.sh` | Destructive fault injection: SIGKILL recovery, Redis restart, stale-writer fencing | - | Kills workers/restarts Redis; run against a stack you can recreate. |
+| `scripts/check_encoding.py` | CI gate: every text file must be valid UTF-8 | - | stdlib only; also run by the quality CI job. |
 | `scripts/package.py` | Builds and verifies the delivery archive | - | Refuses to include excluded paths; excludes Terraform state/caches. |
+| `.github/workflows/ci.yml` | Five CI jobs: quality (ruff, format, mypy, secret grep, encoding), unit, integration (API + repository/lease + e2e), frontend, terraform | - | Runs with `AI_MODE=fake`; no provider credentials. |
+| `requirements.lock.txt`, `requirements-dev.lock.txt` | Exact pins generated with `pip freeze` from the verified images; installed by the Dockerfile | - | `requirements*.txt` stay the human-edited intent; regenerate locks when the intent changes. |
 | `infra/versions.tf`, `infra/modules/s3/`, `infra/modules/ec2-app/` | Terraform: shared S3 bucket module (private, versioned, optional lifecycle) and production EC2 host module (security group, IAM instance profile, Elastic IP, user_data) | - | One module serves both environments; no forked local/prod modules. |
 | `infra/envs/local/`, `infra/envs/prod/` | Environment composition: LocalStack provider vs real AWS provider, state/backend, module inputs, tfvars | - | Local is applied automatically by Compose; production is validated, not applied, in this delivery. |
 | `infra/envs/*/.terraform.lock.hcl` | Committed provider pin (same lock in both envs) | - | Never commit `*.tfstate*`, `.terraform/` or `*.tfvars`. |
@@ -108,11 +118,21 @@ The provider side (if any) belongs in `app/providers/`. Steps, in order:
    in `docs/PROGRESS.md`. A parser that is not listed in the parsers endpoint with an honest note
    should not ship.
 
-The GPT-5 Mini path is the worked example of the *disabled* option: `app/parsers/openai_parser.py`
-has a working constructor signature and a `parse()` that raises `PROVIDER_NOT_IMPLEMENTED`;
-`IMPLEMENTED = False` makes the registry report `enabled: false` with "not implemented in this
-delivery; use pypdf or gemini". Flip the flag only together with a genuinely tested
-implementation.
+There are **two worked examples**, and they differ only in the provider:
+
+- **Gemini** (`app/parsers/gemini_parser.py` + `app/providers/gemini.py`): real live calls, a
+  `GeminiClient` behind the adapter, one request per page, live-verified.
+- **GPT-5 Mini** (`app/parsers/openai_parser.py` + `app/providers/openai_adapter.py`): same shape,
+  different SDK - Responses API with the page sent as an inline PDF. Its payload, page ordering,
+  page cap and error mapping are pinned by `tests/unit/test_openai_parser.py` against a stub, and
+  no live OpenAI call has been made here. Copy this pattern when a provider's credentials are not
+  available in the development environment: implement against the documented API surface, stub the
+  SDK in tests, and let the registry keep the parser disabled until the key exists.
+
+Both AI parsers share `pdf_pages.split_pdf_pages` (do not fork the splitter) and both clients use
+`ProviderPacer` (do not implement your own rate limiting). Add a deterministic fake only if the
+parser should run in `AI_MODE=fake`; the registry substitutes `FakeParser` for parsers with a real
+implementation, and the fake must mimic the real limits.
 
 ## 3. How to change a limit safely
 
@@ -173,18 +193,27 @@ changing `.env`).
 | `WORKER_BATCH_SIZE` | `8` | `app/queue.py` `XREADGROUP`/`XAUTOCLAIM` count | Entries fetched per read. Keep it >= `WORKER_CONCURRENCY` so slots are never idle; a very large batch just means more entries held by one consumer before dispatch. |
 | `WORKER_SHUTDOWN_GRACE_SECONDS` | `30` | `app/worker.py` `_drain` | On SIGTERM, how long in-flight jobs may finish before they are cancelled and left pending. Longer = fewer wasted provider calls on deploy; shorter = faster restarts. |
 | `WORKER_READ_BLOCK_MS` | `2000` | `app/queue.py` | How long an idle read blocks; also bounds how often stale entries are swept. |
-| `PROVIDER_MAX_CONCURRENCY` | `4` | `app/providers/gemini.py` semaphore | Simultaneous provider requests per worker process (parser and summarizer share one client). Raise only with `WORKER_CONCURRENCY`; keep it <= the worker's capacity or it is dead weight. |
-| `PROVIDER_MAX_REQUESTS_PER_MINUTE` | `0` (off) | `app/providers/gemini.py` token bucket | Client-side rate cap per process. Set it to the provider's published limit; throughput becomes about `RPM / calls_per_document`. Leaving it at 0 in live mode under bursts turns a rate limit into `PROVIDER_ERROR` failures observed by the user. |
+| `PROVIDER_MAX_CONCURRENCY` | `4` | `ProviderPacer` in each provider client | Simultaneous provider requests per **client instance**. A live Gemini worker can hold a Gemini parser client, a Gemini summarizer client and an OpenAI client, each with its own pacer. Raise only with `WORKER_CONCURRENCY`. |
+| `PROVIDER_MAX_REQUESTS_PER_MINUTE` | `0` (off) | `ProviderPacer` token bucket | Client-side rate cap per client instance. Set it to the provider's published limit (leave headroom for the summarizer client); throughput becomes about `RPM / calls_per_document`. Leaving it at 0 in live mode under bursts turns a rate limit into `PROVIDER_ERROR` failures observed by the user. |
+| `MAX_CONCURRENT_UPLOADS` | `16` | `app/api/documents.py` admission semaphore | Simultaneous uploads buffered per API process. This is the upload-memory ceiling: `MAX_CONCURRENT_UPLOADS x MAX_BATCH_BYTES`. Raises latency under load rather than memory. |
+| `UPLOAD_SLOT_TIMEOUT_SECONDS` | `10.0` | same | How long an upload waits for a slot before `503` + `Retry-After: 1`. |
 | `RETRY_AFTER_MAX_SECONDS` | `30` | `app/worker.py` `_retry_delay` | Clamp for a provider's `Retry-After`. If the RPM is set, keep this meaningfully larger than `60 / RPM`. |
 | `FAKE_DELAY_SECONDS` | `0.0` | `app/providers/fake.py` | Deterministic per-document latency for fake-mode load/concurrency runs; makes stress numbers comparable. |
 
 Relations the validator enforces (see `Settings._check_relationships`): `WORKER_CONCURRENCY >= 1`,
 `WORKER_BATCH_SIZE >= 1`, `WORKER_SHUTDOWN_GRACE_SECONDS > 0`, `PROVIDER_MAX_CONCURRENCY >= 1`,
-`PROVIDER_MAX_REQUESTS_PER_MINUTE >= 0` (0 = disabled), `RETRY_AFTER_MAX_SECONDS > 0`, plus the
-existing heartbeat/lease/deadline and limit rules. Pacing is **per process**: two worker replicas
-each get their own semaphore and token bucket, so divide a plan-wide RPM across them (or run one
-worker). Changes here are worth re-measuring with `scripts/stress.py` and, for provider pacing, with
-the live-provider recipe in [PERFORMANCE.md](PERFORMANCE.md) - and the result belongs in the ledger.
+`PROVIDER_MAX_REQUESTS_PER_MINUTE >= 0` (0 = disabled), `MAX_CONCURRENT_UPLOADS >= 1`,
+`UPLOAD_SLOT_TIMEOUT_SECONDS > 0`, `RETRY_AFTER_MAX_SECONDS > 0`, plus the existing
+heartbeat/lease/deadline and limit rules. Pacing is **per provider client instance** (not per
+process and not per worker): a job using a Gemini parser plus the Gemini summarizer can consume two
+pacers, and multiple worker processes multiply again. Changes here are worth re-measuring with
+`scripts/stress.py` and, for provider pacing, with the live-provider recipe in
+[PERFORMANCE.md](PERFORMANCE.md) - and the result belongs in the ledger.
+
+The nginx rate limits are **not** in `app/config.py`: they are the two `limit_req_zone` directives
+outside the `server` block of `frontend/nginx.conf` (http context, required by nginx) plus
+`limit_req` inside the matching `location`s. Changing them is a config/rebuild change, not an env
+var, and they only guard the UI origin.
 
 ## 4. How to add an endpoint
 
@@ -215,6 +244,19 @@ can go there, or in a new module whose router is included in `app/main.py::creat
 6. **Docs.** Add the endpoint to the table and body shapes in `docs/API.md`, add any new error code
    to its error-code table, and mention it in `README.md` if it is reviewer-relevant. The HTTP API
    is frozen in `docs/CONTRACT.md` section 5, so a new or changed endpoint is a coordinated change.
+
+**Worked example - the listing endpoint.** `GET /api/v1/documents` shows the full pattern for a
+read endpoint with pagination: a response model pair (`DocumentList` + `DocumentSummary`) in
+`app/models.py`, a repository method that owns the Redis access (`JobRepository.list_recent` /
+`score_of` backed by `docs:index`), a cursor (`next_before` = zset score, exclusive), FastAPI
+`Query(ge=1, le=100)` bounds so out-of-range values are `422`, and Redis errors mapped to `503`.
+Its tests are two layers: `tests/integration/test_api.py::TestListing` for HTTP semantics and
+`tests/integration/test_repository.py` for the storage behaviour.
+
+Any new **expensive** endpoint (anything that buffers a file, calls a provider, or scans a large
+key space) needs two decisions recorded: whether it goes behind admission control
+(`AppContext.upload_slots` is the upload example), and whether the proxy rate limit is enough or a
+per-op guard is required. Cheap read endpoints are rate-limited by the shared `api` zone.
 
 ## 5. How to change infrastructure
 
@@ -283,9 +325,11 @@ Terraform commands need either Terraform installed or the pinned container image
    from the checkpoint. Mapping a transient store blip to a terminal `failed` is the exact bug the
    fault campaign found; there is an architecture-level test for it only in
    `scripts/resilience.sh redis`.
-8. **Provider calls go through the client.** All model requests must go through `GeminiClient`
-   (`app/providers/gemini.py`) so the semaphore, token bucket, `Retry-After` handling, timeout and
-   error mapping apply. Do not instantiate the vendor SDK elsewhere.
+8. **Provider calls go through an adapter client.** All model requests must go through
+   `GeminiClient` (`app/providers/gemini.py`) or `OpenAIClient`
+   (`app/providers/openai_adapter.py`), both of which use `ProviderPacer`, honour `Retry-After`
+   and map errors. Do not instantiate a vendor SDK anywhere else, and do not write your own
+   semaphore/token bucket. AI parsers share `pdf_pages.split_pdf_pages`; do not fork the splitter.
 9. **Pages are 1-based, ordered, contiguous.** The worker calls `validate_pages`; empty pages are
    kept so numbering matches the source document. Keep that invariant in any new parser.
 10. **Blocking work off the event loop.** `asyncio.to_thread` for PyPDF and boto3, async clients
@@ -294,25 +338,29 @@ Terraform commands need either Terraform installed or the pinned container image
     `ParseResult`, `PageResult`, and `ParserError` subclasses only.
 12. **Timestamps** use `utc_now_iso()` (`YYYY-MM-DDTHH:MM:SSZ`) everywhere - it is the single
     timestamp format in hashes, API responses, and the UI contract.
-13. **Line endings and encoding.** `.gitattributes` normalizes text files to LF; shell scripts must
-    stay LF-only (a CRLF shebang fails silently on Linux). Keep the documentation set ASCII-only.
-    Do not name a parser module `pypdf.py` - it shadows the `pypdf` dependency.
-14. **Style.** Type hints throughout, `from __future__ import annotations`, comments that explain
-    *why* a thing exists. There is no configured formatter or linter in `pyproject.toml` (it only
-    carries pytest configuration); style is maintained by review. `# noqa: BLE001` appears only at
-    documented resilience boundaries (a bad provider import must not kill the process, one bad job
-    must not kill the worker).
+13. **Line endings, encoding and the doc set.** `.gitattributes` normalizes text files to LF; shell
+    scripts must stay LF-only. Every text file must be valid UTF-8 - CI runs
+    `scripts/check_encoding.py` (a cp1252 em dash once broke `mypy`). Keep the documentation set
+    ASCII-only. Do not name a parser module `pypdf.py` - it shadows the `pypdf` dependency.
+14. **Style and types are enforced, not reviewed by eye.** `ruff check` (E,F,W,I,N,B,UP,SIM,RUF,
+    line-length 100), `ruff format --check` and `mypy` over `app/` run in CI and are expected clean
+    before commit; configuration is in `pyproject.toml`. `# noqa: BLE001` appears only at documented
+    resilience boundaries (a bad provider import must not kill the process, one bad job must not
+    kill the worker).
 15. **Tests assert outcomes and fail loudly.** No mocking of the HTTP layer for integration tests;
     poll with deadlines instead of fixed sleeps; load/fault harnesses exit non-zero on any failure
     so they can be used as gates. An opt-in test must skip (not pass) when its precondition is
-    absent.
-16. **Dependencies** are bounded ranges in `requirements.txt` (runtime) and
-    `requirements-dev.txt` (tests: pytest, httpx, pytest-asyncio). There is no hash-pinned
-    lockfile in the repository; the image build resolves the bounded ranges. A comment in
-    `requirements.txt` says the resolved versions are frozen in `docs/PROGRESS.md`, but the
-    current `PROGRESS.md` has no dependency-freeze section - that is a documentation gap worth
-    closing if a reproducible dependency set is required. Add a runtime dependency to
-    `requirements.txt` and a test-only one to `requirements-dev.txt`, then rebuild the image.
+    absent. The repository suite uses unique stream keys and never flushes.
+16. **Cheap by construction where possible.** Expensive endpoints (buffering a file, calling a
+    provider, scanning large key spaces) need an explicit decision about admission control and rate
+    limiting; the upload path is the worked example. New read APIs that need to survive a UI
+    refresh should be backed by a Redis index written in the same transaction as the state, as
+    `docs:index` is.
+17. **Dependencies are pinned.** `requirements.txt` / `requirements-dev.txt` are the human-edited
+    intent with bounded ranges; `requirements.lock.txt` / `requirements-dev.lock.txt` are exact
+    `pip freeze` output from the verified images and are what the Dockerfile installs. Change the
+    intent, regenerate both lock files from the image, rebuild. CI installs the locks, so they are
+    the real dependency set.
 
 ## 7. Local development and running things
 
@@ -331,18 +379,34 @@ Terraform commands need either Terraform installed or the pinned container image
   instance. LocalStack S3 *is* published (on `127.0.0.1:${LOCALSTACK_PORT:-4566}`) and the local
   bucket is created by Terraform, so host-side tools see the same bucket once the stack is up. This
   is a documented constraint, not a tested workflow.
-- **Tests.** See [TESTING.md](TESTING.md): unit suite via the `test` profile (offline), integration
-  suite against the running stack with the `samples/` mount. Integration tests are black-box HTTP
-  and create real documents in the running stack; they never flush Redis. The concurrency suite is
-  opt-in (`RUN_CONCURRENCY_TESTS=1`) and wants a disposable fake-mode worker.
+- **Tests.** See [TESTING.md](TESTING.md): 82 backend checks (44 unit offline, 16 API integration,
+  14 repository/lease with Redis only, 8 proxy e2e with the frontend) plus 4 opt-in (3 concurrency,
+  1 live AI) and 29 frontend vitest tests. Integration tests create real documents in the running
+  stack and never flush Redis. The concurrency suite is opt-in (`RUN_CONCURRENCY_TESTS=1`) and
+  wants a disposable fake-mode worker.
+- **Frontend.** `cd frontend && npm ci && npm test && npx tsc --noEmit && npm run build`. Vitest
+  covers the API error/envelope parsing, polling/backoff, recent-document rehydration, status
+  mapping and the App-level reload recovery.
+- **Quality gates (all also run in CI).** In the dev image:
+  `docker run --rm -v "$PWD:/src" -w /src <test-image> ruff check .`;
+  `ruff format --check .`; `mypy --cache-dir=/tmp/mypy`. On the host:
+  `python scripts/check_encoding.py`. The CI secret grep is part of the quality job. Configuration
+  lives in `pyproject.toml` (ruff select/ignore, line length 100; mypy over `app/` with
+  `check_untyped_defs`). Run them before opening a PR; a red quality job is a hard failure. All
+  three were clean when checked against the working tree in this documentation pass (`ruff check`
+  passed, 52 files formatted, mypy 24 modules clean, encoding valid).
+- **Dependency locks.** `requirements.txt` / `requirements-dev.txt` are the intent;
+  `requirements.lock.txt` / `requirements-dev.lock.txt` are generated from the verified images
+  (`docker run --rm --entrypoint pip <image> freeze | grep '==' | sort`) and installed by the
+  Dockerfile. After changing the intent, regenerate **both** locks, rebuild, and commit the locks.
 - **Load and fault harnesses.** `scripts/stress.py` (throughput, exits non-zero on failure) and
   `scripts/resilience.sh` (destructive: SIGKILL, Redis restart, fencing). Commands, mounts and
   caveats: [RUNBOOK.md](RUNBOOK.md) section 11; measured method and results:
   [PERFORMANCE.md](PERFORMANCE.md). Do not run the fault script against a stack you cannot recreate.
 - **Samples.** Regenerate with `python scripts/make_samples.py`; output is byte-identical, so the
   deterministic fixtures can be diffed.
-- **Ops.** Start/stop, health, logs, queue inspection, provisioning, load/fault harnesses and
-  troubleshooting are in [RUNBOOK.md](RUNBOOK.md).
+- **Ops.** Start/stop, health, logs, queue inspection, provisioning, load/fault harnesses, test
+  commands and troubleshooting are in [RUNBOOK.md](RUNBOOK.md).
 
 ## 8. Change checklist
 
@@ -352,12 +416,18 @@ Before calling a change done:
       `docs/CONTRACT.md`.
 - [ ] New limit default changed in `app/config.py` only, mirrored in `.env.example`, and reflected
       in `README.md` / `docs/API.md` / `docs/ARCHITECTURE.md` where stated.
-- [ ] New parser registered in `app/registry.py` with an honest note, and covered by at least one
-      integration test and one failure-mapping test where feasible.
-- [ ] New state writes go through `JobRepository` and are fenced if they change observable state.
+- [ ] New parser registered in `app/registry.py` with an honest note, covered by an offline test
+      (stub the provider SDK) and, where safe, an integration test; no live provider call in the
+      default suite.
+- [ ] New state writes and index writes go through `JobRepository` and are fenced if they change
+      observable state.
 - [ ] New error codes are stable, classified (`retryable` true/false), and documented in
       `docs/API.md`.
 - [ ] No secrets, document text, prompts, or PDF bytes in logs or API output.
+- [ ] Quality gates clean: `ruff check`, `ruff format --check`, `mypy`,
+      `python scripts/check_encoding.py`; no credential-shaped string added.
+- [ ] If dependencies changed: both `requirements*.lock.txt` regenerated from the verified image
+      and the image rebuilt.
 - [ ] If worker concurrency, retry/backoff or provider pacing changed: the unit hardening tests
       still pass, the concurrency suite was run with `RUN_CONCURRENCY_TESTS=1` against a fake-mode
       worker, and `scripts/stress.py` / the relevant `scripts/resilience.sh` scenario was re-run if
@@ -365,7 +435,7 @@ Before calling a change done:
 - [ ] Infrastructure changes: `terraform fmt -check -recursive` clean and `terraform validate`
       valid for both `infra/envs/local` and `infra/envs/prod`; no `*.tfstate*`, `.terraform/`,
       `*.tfvars` or `*.tfplan` staged; local re-applied through the provisioner.
-- [ ] Unit suite still offline; integration suite run against a stack that was actually restarted
-      with the new environment; the result recorded in `docs/PROGRESS.md`.
+- [ ] Unit suite still offline; integration, repository and e2e suites run against a stack that was
+      actually restarted with the new environment; the result recorded in `docs/PROGRESS.md`.
 - [ ] Documentation set updated (this file, plus the affected derived documents), and links still
       resolve.

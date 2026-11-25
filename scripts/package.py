@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -138,6 +139,13 @@ def is_excluded(relative: Path) -> bool:
         return True
     if relative.name in EXCLUDED_FILES:
         return True
+    # Any dotenv variant is local state; only the tracked template ships. This is not hypothetical:
+    # a stale `.env.bak` holding a live API key was once packaged into the deliverable.
+    if relative.name.startswith(".env") and relative.name != ".env.example":
+        return True
+    # Editor / merge leftovers can carry the same content.
+    if relative.name.endswith((".bak", ".orig", ".rej", ".swp")):
+        return True
     # Covers terraform.tfstate and terraform.tfstate.backup alike.
     if ".tfstate" in relative.name:
         return True
@@ -181,17 +189,33 @@ def main() -> int:
         for relative in files:
             archive.write(REPO_ROOT / relative, arcname=f"{REPO_ROOT.name}/{relative}")
 
-    # Re-open and verify: exclusions are a claim until checked.
+    # Re-open and verify: exclusions are a claim until checked. The archive is also scanned for
+    # credential-shaped strings, because "the .env was not copied" is exactly the sort of thing that
+    # was true until a stale backup made it false.
+    secret_pattern = re.compile(
+        r"AIza[0-9A-Za-z_\-]{30,}|sk-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|"
+        r"AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    )
+    leaked: list[str] = []
     with zipfile.ZipFile(destination) as archive:
         names = archive.namelist()
         bad = [
             name
             for name in names
             if any(f"/{part}/" in name or name.endswith(f"/{part}") for part in EXCLUDED_DIRS)
-            or name.endswith((".pyc", ".log"))
-            or name.endswith("/.env")
+            or name.endswith((".pyc", ".log", ".bak", ".orig", ".rej"))
+            or (name.rsplit("/", 1)[-1].startswith(".env") and not name.endswith(".env.example"))
         ]
         corrupt = archive.testzip()
+        for name in names:
+            if name.endswith((".pdf", ".png", ".jpg", ".woff", ".woff2", ".zip")):
+                continue
+            try:
+                text = archive.read(name).decode("utf-8", errors="ignore")
+            except (KeyError, OSError):
+                continue
+            if secret_pattern.search(text):
+                leaked.append(name)
 
     size_mb = destination.stat().st_size / (1024 * 1024)
     print(f"wrote {destination}")
@@ -203,6 +227,11 @@ def main() -> int:
     if bad:
         print("  EXCLUDED CONTENT LEAKED:", file=sys.stderr)
         for name in bad[:10]:
+            print(f"    - {name}", file=sys.stderr)
+        return 1
+    if leaked:
+        print("  CREDENTIAL-SHAPED STRING FOUND IN THE ARCHIVE:", file=sys.stderr)
+        for name in leaked[:10]:
             print(f"    - {name}", file=sys.stderr)
         return 1
     print("  verification: no excluded paths, archive reads back cleanly")

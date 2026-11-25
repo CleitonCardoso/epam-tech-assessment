@@ -682,7 +682,7 @@ docker compose --profile test run --rm \
 `pytest -q -m "not integration"`, which excludes repository and e2e because both also carry the
 `integration` marker.
 
-Quality gates (also the six CI jobs in `.github/workflows/ci.yml`: quality, unit, integration+e2e,
+Quality gates (also the five CI jobs in `.github/workflows/ci.yml`: quality, unit, integration,
 frontend, terraform; the quality job runs lint, format, types, secret grep and encoding):
 
 ```bash
@@ -694,6 +694,11 @@ docker run --rm -v "$PWD:/src:ro" -w /src <test-image> mypy --cache-dir=/tmp/myp
 # On the host (stdlib only)
 python scripts/check_encoding.py        # fails on any non-UTF-8 text file
 ```
+
+Verified in this documentation pass against the working tree: `ruff check .` -> "All checks
+passed!", `ruff format --check` -> "52 files already formatted", `mypy` -> "no issues found in 24
+source files", encoding gate clean. (On a read-only mount, add `--no-cache` to `ruff format
+--check`; without it ruff tries to write `.ruff_cache` and fails on the read-only filesystem.)
 
 Lock files: the Dockerfile installs `requirements.lock.txt` (and
 `requirements-dev.lock.txt` for the test profile); `requirements*.txt` are the human-edited intent.

@@ -175,13 +175,13 @@ The per-file `413` path is covered by `TestValidation.test_oversized_file_is_ref
 
 ### `503` response
 
-Two different bodies share this status:
+Three different bodies share this status:
 
-- **Parser not enabled** - HTTPException shape. Example verified live in live mode with
-  `gpt-5-mini`:
+- **Parser not enabled** - HTTPException shape. Observed live in this environment (live mode, no
+  OpenAI key):
 
   ```json
-  {"detail": "Parser 'gpt-5-mini' is not available right now. Parser 'gpt-5-mini' is not available: not implemented in this delivery; use pypdf or gemini"}
+  {"detail": "Parser 'gpt-5-mini' is not available right now. Parser 'gpt-5-mini' is not available: OPENAI_API_KEY is not configured"}
   ```
 
   In `AI_MODE=live` with no Gemini key every parser is disabled, and the detail explains that

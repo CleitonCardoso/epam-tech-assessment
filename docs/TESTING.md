@@ -3,41 +3,51 @@
 What is tested, how to run each layer, what each layer actually proves, and - explicitly - what is
 not covered by any automated test.
 
-Inventory: **45 test functions** in four files. **17 are integration-marked**; a default
-`-m integration` run executes 13 and skips 4 opt-in tests (3 concurrency + 1 live AI).
+## Inventory
 
-| Suite | File | Tests | Runs by default | Needs a running stack | Calls a paid provider |
-|---|---|---|---|---|---|
-| Unit (contract) | `tests/unit/test_contract.py` | 14 | yes | no | no |
-| Unit (hardening) | `tests/unit/test_hardening.py` | 14 | yes | no | no |
-| Integration (HTTP end to end) | `tests/integration/test_api.py` | 13 | yes | yes | no |
-| Integration (concurrency, opt-in) | `tests/integration/test_concurrency.py` | 3 | no - needs `RUN_CONCURRENCY_TESTS=1` | yes, plus a disposable fake-mode worker | no (`pypdf` only; the summary is the configured summarizer) |
-| Opt-in live AI | `tests/integration/test_live_ai.py` | 1 | no - needs `RUN_LIVE_AI_TESTS=1` | yes, in `AI_MODE=live` with a real key | yes |
+**82 backend checks run by default** (44 unit + 16 API integration + 14 repository/lease + 8 proxy
+e2e), **4 opt-in** backend tests (3 concurrency + 1 live AI), and **29 frontend vitest tests**.
 
-Verified first-hand in this pass: unit suite **28 passed, 17 deselected in 0.77 s**; the integration
-directory collects **17 tests** (13 default + 3 concurrency + 1 live). Ledger results for the gated
-runs: default integration **13 passed + 4 skipped**; concurrency **3 passed** when opted in; live AI
-**1 passed** when opted in. Measurements from the load/fault campaign are in
+| Suite | File | Tests | Runs by default | Needs |
+|---|---|---|---|---|
+| Unit (contract) | `tests/unit/test_contract.py` | 14 | yes | nothing |
+| Unit (hardening) | `tests/unit/test_hardening.py` | 17 | yes | nothing |
+| Unit (GPT-5 Mini adapter/parser) | `tests/unit/test_openai_parser.py` | 13 | yes | nothing (stubbed SDK) |
+| API integration | `tests/integration/test_api.py` | 16 | yes | running stack |
+| Repository/lease | `tests/integration/test_repository.py` | 14 | yes (separate CI job) | **Redis only** |
+| Proxy e2e | `tests/e2e/test_proxy.py` | 8 | yes (separate CI job) | stack incl. frontend |
+| Concurrency (opt-in) | `tests/integration/test_concurrency.py` | 3 | no - `RUN_CONCURRENCY_TESTS=1` | stack + disposable fake-mode worker |
+| Live AI (opt-in) | `tests/integration/test_live_ai.py` | 1 | no - `RUN_LIVE_AI_TESTS=1` | `AI_MODE=live` + real `GEMINI_API_KEY` |
+| Frontend unit/component | `frontend/src/*.test.ts(x)` | 29 | yes (`npm test`, CI) | Node 22 + `npm ci` |
+
+Verified first-hand in this documentation pass: unit suite **44 passed, 42 deselected in 2.01 s**;
+collection counts **16 API / 14 repository / 8 e2e / 3 concurrency / 1 live**; the repository/lease
+suite ran against the live Redis and passed **14/14 in 0.69 s**; frontend test files contain **29**
+`it(...)` cases (the vitest suite was not executed here - Node 22 is present but `node_modules` is
+not installed in this checkout). Quality gates were also run against the working tree with the dev
+image: `ruff check .` -> "All checks passed!", `ruff format --check` -> "52 files already
+formatted", `mypy` -> "no issues found in 24 source files", and `scripts/check_encoding.py` ->
+all text files valid UTF-8. The verification ledger (what was actually run, and what was skipped)
+is [PROGRESS.md](PROGRESS.md); measurements from the load/fault campaign are in
 [PERFORMANCE.md](PERFORMANCE.md).
 
 ## Running the suites
 
 ### Unit suite (offline, no stack)
 
-The Compose `test` profile exists for exactly this: the same image with `pytest` installed, and the
-`tests/` + `pyproject.toml` mounted read-only. Its command is baked in:
+The Compose `test` profile is the supported path: same image with `pytest`, `tests/` and
+`pyproject.toml` mounted read-only. Its baked-in command is:
 
 ```bash
 docker compose --profile test run --rm test
 # equivalent to: python -m pytest -q -m "not integration"
 ```
 
-This does not start any service and does not need Redis, S3, or HTTP. It may build the test image
-the first time (`INSTALL_DEV=1`), but it never touches the running `api`/`worker` containers.
+That excludes repository/e2e/concurrency/live tests because all of them also carry the
+`integration` marker. It needs no Redis, S3, HTTP or provider.
 
-The same suite can be run without Compose by using the test image directly. This is the command
-that was actually **executed** during this documentation pass, against the current working-tree
-`app/` and `tests/` (mounted read-only over the image):
+The same suite can be run directly with the test image (this is what was **executed** in this
+pass, against the working-tree `app/` and `tests/` mounted read-only over the image):
 
 ```powershell
 $root = (Get-Location).Path.Replace('\','/')
@@ -48,63 +58,86 @@ docker run --rm --network none `
   epam-tech-assessment-test python -m pytest -q -m "not integration"
 ```
 
-Observed result in this pass: **28 passed, 17 deselected in 0.77 s** (the 17 deselected are the 13
-`test_api.py` tests, the 3 opt-in concurrency tests and the opt-in live test - all marked
-`integration`). Mounting `app/` and `tests/` was deliberate: the built image can be older than the
-working tree (see the OneDrive build-context caveat in [PROGRESS.md](PROGRESS.md)), and the point of
-a unit run is to test the code you are looking at. Nothing in this run touched Redis, S3, HTTP or a
-provider.
+Observed: **44 passed, 42 deselected in 2.01 s** (42 = 16 API + 14 repository + 8 e2e + 3
+concurrency + 1 live). Mounting `app/` and `tests/` was deliberate: the built image can be older
+than the working tree (OneDrive build-context caveat), and a unit run should test the code you are
+looking at.
 
-The host has `py -3` = Python 3.14.0b2 with **no pytest installed**, so the host-side variant
+The host has `py -3` = Python 3.14.0b2 with **no pytest installed**, so `py -3 -m pytest tests/unit`
+was **not executed**. Tests normally run in the container (Python 3.12).
 
-```bash
-py -3 -m pytest tests/unit -q
-```
-
-was **not executed** here (it would need `pip install -r requirements-dev.txt`). The project
-targets Python 3.12 and tests are normally run in the container.
-
-### Integration suite (running stack required)
+### API integration suite (running stack required)
 
 ```bash
 docker compose up -d
 docker compose --profile test run --rm \
   -e API_BASE_URL=http://api:8000 \
   -v "$(pwd)/samples:/app/samples:ro" \
-  test python -m pytest tests/integration -m integration -q
+  test python -m pytest tests/integration/test_api.py -m integration -q
 ```
 
-Two details that cost time if missed:
+- `API_BASE_URL=http://api:8000` is the Compose-network name; the default in `tests/conftest.py`
+  is `http://localhost:8000` for host-side runs.
+- The `samples/` mount is required: `samples/` is dockerignored, so the image has no fixtures, and
+  `tests/conftest.py` resolves them as `/app/samples`. Without it tests that need a sample skip
+  with a clear message instead of failing.
+- The readiness wait lives in the session `client` fixture (not an autouse fixture), so a suite
+  that does not request `client` - the repository suite - does not wait for the API.
+- `docker compose up -d` also runs the one-shot Terraform `provisioner`; api/worker are gated on it,
+  so a first `up` takes a minute or two longer. If readiness never comes up, check
+  `docker compose logs provisioner` first.
 
-- `-e API_BASE_URL=http://api:8000`: inside the Compose network the API is `api:8000`, not
-  `localhost:8000`. The default in `tests/conftest.py` is `http://localhost:8000` for host-side
-  runs.
-- `-v "$(pwd)/samples:/app/samples:ro"`: `samples/` is excluded by `.dockerignore`, so the test
-  image has no sample PDFs. `tests/conftest.py` resolves samples as `<repo>/samples`, which is
-  `/app/samples` in the container. Without the mount, every test that needs a sample skips with
-  `sample ... missing; run python scripts/make_samples.py` instead of failing - easy to misread
-  as a pass.
+### Repository/lease suite (Redis only)
 
-The autouse `stack_ready` fixture polls `GET /health/ready` for up to `TEST_READY_TIMEOUT` seconds
-(default 60) and exits the whole run with a clear message if the stack never becomes ready, so a
-forgotten `docker compose up -d` produces one useful error instead of a wall of connection errors.
-Note that `docker compose up -d` now also runs the one-shot Terraform `provisioner`; `api`/`worker`
-are gated on it, so on a first run (provider download) the stack takes a minute or two longer to
-become ready. If readiness never comes up, check `docker compose logs provisioner` before blaming
-the tests.
-
-Host-side variant (not executed here because the host has no pytest; it would also need network
-access to `localhost:8000`):
+The fenced-commit heart, tested against a real Redis with per-run stream keys, a short lease and
+`reclaim_min_idle_ms`; it never flushes the database.
 
 ```bash
-API_BASE_URL=http://localhost:8000 py -3 -m pytest tests/integration -m integration -q
+docker compose up -d redis
+docker compose --profile test run --rm \
+  -e REDIS_URL=redis://redis:6379/0 \
+  test python -m pytest tests/integration/test_repository.py -m repository -q
 ```
 
-Recorded results from the verification ledger: default run **13 passed, 4 skipped** (the 4 skipped
-are the 3 concurrency tests and the 1 live-AI test - both groups are opt-in and report themselves
-as skipped, never passed). With the stack in `AI_MODE=live` and a real key, an earlier full run was
-**13 passed, 1 skipped** in 25.99 s before the concurrency tests were added; the live test still
-skips without its flag.
+Observed in this pass with the current tree: **14 passed in 0.69 s**.
+
+### Proxy e2e suite (stack incl. frontend)
+
+```bash
+docker compose --profile test run --rm \
+  -e FRONTEND_URL=http://frontend:80 \
+  -v "$(pwd)/samples:/app/samples:ro" \
+  test python -m pytest tests/e2e -m e2e -q
+```
+
+`FRONTEND_URL` defaults to `http://frontend:80`; the suite fails with a clear message if nginx is
+not reachable. Recorded ledger result: **8 passed in 8.46 s**.
+
+### Concurrency tests (opt-in, fake-mode worker)
+
+3 tests: a 20-document simultaneous burst that must all be accepted and settle, API responsiveness
+during that burst, and a mixed batch under load. Skipped unless `RUN_CONCURRENCY_TESTS=1`.
+
+Why opt-in: the burst uploads ~20 documents at once; against a live provider that is dozens of real
+model calls, so the tests would be slow, cost quota, and could fail on the provider's rate limit
+rather than on a defect. Use a disposable fake-mode worker:
+
+```bash
+docker compose stop worker
+docker compose run -d --name concurrency-w --no-deps \
+  -e AI_MODE=fake -e FAKE_DELAY_SECONDS=0.05 -e WORKER_CONCURRENCY=4 \
+  worker python -m app.worker
+
+docker compose --profile test run --rm \
+  -e API_BASE_URL=http://api:8000 -e RUN_CONCURRENCY_TESTS=1 \
+  -v "$(pwd)/samples:/app/samples:ro" \
+  test python -m pytest tests/integration/test_concurrency.py -q
+
+docker rm -f concurrency-w && docker compose start worker
+```
+
+Tunables: `TEST_BURST_SIZE` (20), `TEST_MIXED_LOAD_SIZE` (8), `TEST_BURST_TIMEOUT` (180 s),
+`TEST_REQUEST_TIMEOUT` (60 s). `parser=pypdf` only. Recorded: **3 passed** when opted in.
 
 ### Opt-in live AI test
 
@@ -117,54 +150,26 @@ docker compose --profile test run --rm \
   test python -m pytest tests/integration/test_live_ai.py -q
 ```
 
-Skip rules and what it asserts:
+Skipped by default and reported as skipped, never passed. If the flag is set but the stack is not
+in live mode, the test **fails** with the observed `ai_mode`. With a real key it asserts: completed
+document, >= 2 pages, every page `markdown`, no `ai_mode=fake` warning, non-empty summary that does
+not say "fake mode", and page 1 content containing "page 1" and not "fake markdown". Recorded:
+**1 passed in 12.58 s**.
 
-- Skipped by default (`pytest.mark.skipif(not RUN_LIVE_AI_TESTS)`); skipped is reported as skipped,
-  never as passed.
-- If `RUN_LIVE_AI_TESTS=1` but the stack is not in live mode (no key), the test **fails** with an
-  explicit message including the observed `ai_mode`, rather than silently passing.
-- With a real key it asserts: the document completes, has at least 2 pages, every page is
-  `format: "markdown"`, no `ai_mode=fake` warning is present, the summary is non-empty and does not
-  say "fake mode", and page 1's content contains "page 1" and not "fake markdown". That is a real
-  model call, not a mock.
-- Recorded ledger result with a real key: **1 passed in 12.58 s**; the demo document was a real
-  per-page transcription plus a genuine summary.
-
-### Concurrency tests (opt-in, needs a fake-mode worker)
-
-`tests/integration/test_concurrency.py` contains 3 tests: a 20-document simultaneous burst that must
-be fully accepted and settle, an API-responsiveness probe during that burst, and a mixed batch under
-load. They are **skipped by default** (`RUN_CONCURRENCY_TESTS=1` to enable).
-
-Why opt-in: the burst uploads ~20 documents at once. Against a live provider that is dozens of real
-model calls, so the tests would be slow, cost quota, and could fail on the provider's rate limit
-rather than on a defect. Run them against a disposable **fake-mode** worker:
+### Frontend tests (vitest)
 
 ```bash
-# 1. Replace the normal worker with a disposable fake-mode one for the run
-docker compose stop worker
-docker compose run -d --name concurrency-w --no-deps \
-  -e AI_MODE=fake -e FAKE_DELAY_SECONDS=0.05 -e WORKER_CONCURRENCY=4 \
-  worker python -m app.worker
-
-# 2. Run the opt-in suite (samples mount is still required)
-docker compose --profile test run --rm \
-  -e API_BASE_URL=http://api:8000 -e RUN_CONCURRENCY_TESTS=1 \
-  -v "$(pwd)/samples:/app/samples:ro" \
-  test python -m pytest tests/integration/test_concurrency.py -q
-
-# 3. Restore the normal worker
-docker rm -f concurrency-w && docker compose start worker
+cd frontend
+npm ci
+npm test          # vitest run: 29 tests
+npx tsc --noEmit  # type-check
+npm run build
 ```
 
-Tunables (env vars, for a weaker machine): `TEST_BURST_SIZE` (default 20), `TEST_MIXED_LOAD_SIZE`
-(default 8), `TEST_BURST_TIMEOUT` (default 180 s), `TEST_REQUEST_TIMEOUT` (default 60 s). The tests
-use `parser=pypdf` only, so they never make a paid extraction call; the summary is the configured
-summarizer (the labelled fake stand-in in fake mode). Recorded ledger result when opted in:
-**3 passed**.
-
-The default `test_api.py::TestConcurrency` test is different: it asserts that `/health/live` and a
-status read stay under 2 s immediately after a `202`, for one queued job, without a burst.
+Covered: API error-body parsing and list-envelope parsing (`api.test.ts`), polling cadence/backoff
+(`polling.test.ts`), rehydrating and merging recent documents (`recentDocuments.test.ts`), status
+labels/terminality (`status.test.ts`), and the App's reload-recovery behaviour (`App.test.tsx`).
+The suite was not executed in this documentation pass (no `node_modules` here); CI runs it.
 
 ### A single test or a subset
 
@@ -173,33 +178,32 @@ docker compose --profile test run --rm test python -m pytest tests/unit -q -k "S
 docker compose --profile test run --rm test python -m pytest tests/unit/test_contract.py::TestModels::test_terminal_statuses -q
 ```
 
-Markers: `integration` is registered both in `pyproject.toml` and by `pytest_configure` in
-`tests/conftest.py`. `pyproject.toml` sets `testpaths = ["tests"]`, so a bare `pytest -q` from the
-repository root collects everything, including the integration tests (which need the stack) and the
-opt-in concurrency/live suites (which skip themselves without `RUN_CONCURRENCY_TESTS=1` /
-`RUN_LIVE_AI_TESTS=1`). The `test` Compose profile is what selects the offline-only subset.
+Markers: `integration`, `e2e`, `repository` (registered in `pyproject.toml` and by
+`pytest_configure` in `tests/conftest.py`). `asyncio_mode = "auto"` - the repository suite is async
+because the Redis client is loop-bound, and tests need no per-test decorator. A bare `pytest -q`
+collects everything including the opt-in suites (which skip without their env flags).
 
 ## Fixtures and sample PDFs
 
-Shared helpers in `tests/conftest.py` (no session-wide autouse fixture - this is what keeps the
-unit suite offline):
+Shared helpers in `tests/conftest.py` (no session-wide autouse fixture - this keeps the unit suite
+offline):
 
 | Helper / constant | Purpose |
 |---|---|
 | `API_BASE_URL` | `API_BASE_URL` env var, default `http://localhost:8000` |
-| `sample(name)` | Path to a sample; skips the test with a clear message if the file is missing |
-| `submit(client, files, parser, extra_forms=None)` | POST a multipart batch; returns the raw `httpx.Response` |
-| `wait_for_terminal(client, id, timeout)` | Polls every 0.3 s until `completed`/`failed`; fails with the last body on timeout |
-| `upload_and_wait(client, files, parser, timeout)` | `submit` + first document id + `wait_for_terminal` |
+| `sample(name)` | Path to a sample; skips with a clear message if missing |
+| `submit(client, files, parser, extra_forms=None)` | POST a multipart batch |
+| `wait_for_terminal(client, id, timeout)` | Polls every 0.3 s until terminal; fails with the last body |
+| `upload_and_wait(client, files, parser, timeout)` | `submit` + first id + `wait_for_terminal` |
 | `READY_TIMEOUT`, `JOB_TIMEOUT` | 60 s defaults, overridable via `TEST_READY_TIMEOUT` / `TEST_JOB_TIMEOUT` |
-| `unique_name(prefix)` | Unique name helper (not used by the current tests) |
+| `unique_name(prefix)` | Unique name helper (not used by current tests) |
 
-Integration-only fixtures in `tests/integration/conftest.py`: a session-scoped `httpx.Client`
-(base URL from `API_BASE_URL`, 30 s timeout), the autouse `stack_ready` readiness gate, and
-`ai_mode` (the `ai_mode` value reported by `/api/v1/parsers`).
+Integration fixtures in `tests/integration/conftest.py`: a session `httpx.Client` whose fixture
+performs the readiness wait, and `ai_mode`. The repository suite builds its own `Redis` client and
+`Settings` per test with unique stream keys.
 
 Sample PDFs under `samples/` are generated deterministically by `scripts/make_samples.py`
-(stdlib only, byte-identical on regeneration):
+(stdlib only, byte-identical regeneration):
 
 | File | Size here | Contents | Expected outcome |
 |---|---|---|---|
@@ -209,148 +213,159 @@ Sample PDFs under `samples/` are generated deterministically by `scripts/make_sa
 
 ## Unit suite - what each test proves
 
-All 28 unit tests live under `tests/unit/` and are dependency-free: no Redis, S3, network, or API
-process. They prove the frozen wire contract, the settings validation and the provider-hardening
-policy, i.e. the assumptions every other module depends on.
+All 44 unit tests live under `tests/unit/` and are dependency-free: no Redis, S3, network, API
+process, or provider. They prove the wire contract, settings validation, retry/pacing policy, and
+the OpenAI adapter's request/error surface against a stub.
 
-`tests/unit/test_contract.py` (14) - the frozen contract and settings:
+### `test_contract.py` (14) - frozen contract and settings
 
-`TestModels` (7):
+`TestModels` (7): `ParserId` values match the API; only `completed`/`failed` are terminal; UTC-Z
+timestamp format; `page_number` is 1-based; `text` vs `markdown` are distinct; `DocumentDetail`
+composes job + pages + summary; `ErrorInfo` round-trips.
 
-| Test | Proves |
-|---|---|
-| `test_parser_ids_match_the_api` | `ParserId` values are exactly `pypdf`, `gemini`, `gpt-5-mini` - the upload form and the API enum cannot drift |
-| `test_terminal_statuses` | Only `completed` and `failed` are terminal; `queued`, `parsing`, `summarizing`, `retrying` are not |
-| `test_timestamp_is_utc_z` | `utc_now_iso()` matches `YYYY-MM-DDTHH:MM:SSZ` exactly |
-| `test_page_number_is_one_based` | `PageResult(page_number=0)` raises a validation error |
-| `test_page_formats_are_distinct` | `text` and `markdown` are distinct values and serialize as such |
-| `test_document_detail_composes_job_and_result` | `DocumentDetail` = job fields + pages + summary; queued detail has empty pages and no error |
-| `test_error_info_round_trips` | `ErrorInfo` JSON round-trip preserves `code`, `message`, `retryable` |
+`TestSettingsValidation` (7): Compose-happy defaults (heartbeat < lease); heartbeat must be lower
+than lease; lease must fit the deadline; AI pages cannot exceed pages; batch must admit one max
+file; reclaim idle defaults to the lease; `ai_available` semantics per mode.
 
-`TestSettingsValidation` (7):
-
-| Test | Proves |
-|---|---|
-| `test_defaults_are_compose_happy` | Defaults target the Compose network (`redis://redis:6379`, `http://localstack:4566`, stream/group names) and heartbeat < lease |
-| `test_heartbeat_must_be_lower_than_lease` | Cross-field validator rejects heartbeat >= lease |
-| `test_lease_must_fit_the_deadline` | Rejects a lease longer than a third of the job deadline |
-| `test_ai_pages_cannot_exceed_pages` | Rejects `MAX_AI_PAGES > MAX_PAGES` |
-| `test_batch_must_admit_one_max_file` | Rejects `MAX_BATCH_BYTES < MAX_UPLOAD_BYTES` |
-| `test_reclaim_idle_defaults_to_the_lease` | `RECLAIM_MIN_IDLE_MS=0` derives the lease length in ms |
-| `test_ai_availability_by_mode` | `ai_available`: fake always true; live only with a key |
-
-`tests/unit/test_hardening.py` (14) - regression tests for what the load/fault campaign found:
+### `test_hardening.py` (17) - regression tests from the load/fault campaign
 
 | Class | Tests | Proves |
 |---|---|---|
-| `TestRetryAfterParsing` (3) | header read as seconds; HTTP-date form ignored instead of guessed; absent header -> `None` | Provider `Retry-After` parsing is deliberate, not best-effort guessing |
-| `TestProviderErrorMapping` (4) | 429 -> transient **carrying `retry_after`**; 503 -> transient; 401 -> permanent; an existing `ParserError` passes through unchanged | The provider failure taxonomy that the worker's retry policy depends on |
-| `TestRetryDelayPolicy` (3) | provider `Retry-After` honoured; clamped by `RETRY_AFTER_MAX_SECONDS`; configured backoff grows and carries +/-20% jitter | A provider asking for ten minutes cannot hold a job past its deadline, and workers do not retry in lockstep |
-| `TestSettingsForPacing` (2) | pacing defaults sane (`RPM=0` means disabled); `PROVIDER_MAX_CONCURRENCY=0` rejected | The new knobs cannot be configured into nonsense |
+| `TestRetryAfterParsing` (3) | header read as seconds; HTTP-date form ignored instead of guessed; absent -> `None` | `Retry-After` parsing is deliberate, not best-effort |
+| `TestProviderErrorMapping` (4) | 429 -> transient carrying `retry_after`; 503 -> transient; 401 -> permanent; existing `ParserError` passes through | The provider failure taxonomy the retry policy depends on |
+| `TestRetryDelayPolicy` (3) | `Retry-After` honoured, clamped by `RETRY_AFTER_MAX_SECONDS`, backoff grows with +/-20% jitter | A provider asking for ten minutes cannot hold a job past its deadline; workers do not retry in lockstep |
+| `TestSettingsForPacing` (2) | pacing defaults sane (`RPM=0` disabled); `PROVIDER_MAX_CONCURRENCY=0` rejected | The knobs cannot be configured into nonsense |
 | `TestParserErrorContract` (2) | `retry_after` defaults to `None` and is preserved | The new field on the frozen error type round-trips |
+| `TestAdmissionControlSettings` (3) | `MAX_CONCURRENT_UPLOADS >= 1`; `UPLOAD_SLOT_TIMEOUT_SECONDS > 0`; defaults bound memory (`16 x 50 MB` worst case) | Admission knobs are validated and conservative by default |
 
-Notably, the unit tests deliberately do not exercise parsers, Redis, S3, HTTP, or the timed token
-bucket. Passing them means "the contract, configuration and retry policy are internally consistent",
-not "the system works". In particular, the fix that a transient Redis error must never become a
-terminal document failure has **no unit test** (it is covered by `scripts/resilience.sh redis`), and
-the token bucket's actual pacing rate is not unit-tested.
+### `test_openai_parser.py` (13) - GPT-5 Mini adapter against a stub
 
-## Integration suite - what each test proves
+| Class | Tests | Proves |
+|---|---|---|
+| `TestRequestPayload` (2) | one inline PDF page per Responses-API request (base64 `data:application/pdf` in `input_file` + `input_text`); an empty provider answer becomes a permanent `PROVIDER_EMPTY_RESPONSE` | The exact request shape and the empty-output rule, without a key |
+| `TestErrorMapping` (5) | 429 transient + `retry_after`; 5xx transient; 401 permanent `PROVIDER_CONFIG`; unknown model permanent; HTTP-date `Retry-After` ignored | OpenAI failures land in the same `TransientError`/`PermanentError` vocabulary as Gemini |
+| `TestParserContract` (6) | one call per page, markdown, in order; `(no extractable text)` -> empty page + warning; no text at all -> `OCR_REQUIRED`; transient propagates for a retry; a permanent page failure names the page; `MAX_AI_PAGES` is enforced before any call | The parser satisfies the frozen `Parser` contract and shares the splitter's limits |
 
-All 13 live in `tests/integration/test_api.py` and talk to the real stack over HTTP. They assert
+The OpenAI adapter has **never made a live call**: no OpenAI credentials exist here. The unit
+tests pin the payload and mapping against a stub; the registry keeps the parser disabled until
+`OPENAI_API_KEY` is set (and, in live mode, summarization also needs `GEMINI_API_KEY`).
+
+## API integration suite - what each test proves
+
+All 16 live in `tests/integration/test_api.py` and talk to the real stack over HTTP. They assert
 outcomes (status codes, page ordering, stable error codes), not that a mock was called.
 
 | Class | Test | Proves |
 |---|---|---|
-| `TestReadiness` | `test_live_is_cheap_and_ready_reports_dependencies` | `/health/live` is exactly `{"status":"ok"}`; `/health/ready` is 200 in a healthy stack, `checks.redis == "ok"`, `checks.s3` contains `ok`, `ai_mode` is `live` or `fake` |
-| | `test_parsers_endpoint_only_advertises_what_works` | The parsers payload has a valid `ai_mode`, `pypdf` is enabled, and **every disabled parser carries a reason** (an unexplained disabled parser is a documentation lie) |
-| `TestHappyPath` | `test_upload_completes_with_ordered_pages_and_one_summary` | Real end-to-end with `pypdf`: `completed`, `error` null, `page_count >= 2`, one page per number 1..N, every page `format: "text"` with non-empty content, exactly one non-empty summary, filename preserved |
-| | `test_gemini_parser_returns_markdown_pages` | The `gemini` parser completes and returns `markdown` pages; in fake mode the document carries an explicit `ai_mode=fake` warning (the stand-in is labelled at the document level, not only in the UI) |
-| `TestBatchIndependence` | `test_one_corrupt_file_does_not_block_the_valid_one` | A valid + corrupt batch returns `202`, one accepted and one rejected with `NOT_A_PDF`, and the valid document still completes |
-| `TestValidation` | `test_unknown_parser_is_rejected` | `422` and the rejected parser name appears in the response |
-| | `test_corrupt_file_only_is_rejected_with_a_reason` | `422` with `rejected[0].code == "NOT_A_PDF"` |
-| | `test_no_files_is_rejected` | A request with only `parser` returns `422` |
-| | `test_oversized_file_is_refused` | A 21 MB file with a valid `%PDF-` signature returns `413` (the size check, not the signature check) |
-| | `test_unknown_document_id_is_404` | An all-zero UUID returns `404` |
-| `TestFailureBehaviour` | `test_blank_pdf_fails_with_ocr_required_and_keeps_a_stable_code` | The blank sample ends `failed` with `error.code = "OCR_REQUIRED"`, `retryable: false`, and no `Traceback` in the client-visible message |
-| `TestConcurrency` | `test_api_stays_responsive_while_a_job_is_queued` | Immediately after a `202`, `/health/live` and the status read each answer in under 2 s, and the job still completes within the timeout - the assessment's "serve concurrent API requests" requirement, at HTTP level |
-| `TestIdempotentAcceptance` | `test_two_uploads_of_the_same_file_get_independent_ids` | Two uploads of the same bytes get two distinct ids and both complete |
+| `TestReadiness` (2) | `/health/live` exactly `{"status":"ok"}`; `/health/ready` reports dependencies; `/api/v1/parsers` only advertises working parsers and every disabled parser carries a reason | Readiness and the honesty rule of the parser list |
+| `TestHappyPath` (2) | `pypdf` upload -> completed, ordered `text` pages 1..N, one non-empty summary; `gemini` -> `markdown`, and fake mode is labelled in the document warnings | The core upload -> poll -> completed path for both parser types |
+| `TestBatchIndependence` (1) | valid + corrupt batch -> 202, one accepted, one rejected with `NOT_A_PDF`, accepted one completes | A bad file does not block a good one |
+| `TestValidation` (5) | unknown parser 422; corrupt-only 422 with reason; no files 422; 21 MB file 413; unknown id 404 | The documented rejection contract |
+| `TestFailureBehaviour` (1) | blank PDF -> `failed`, `error.code = OCR_REQUIRED`, `retryable: false`, no `Traceback` in the message | A stable, safe failure shape |
+| `TestConcurrency` (1) | immediately after a 202, health and status reads answer in under 2 s and the job still completes | The API is not blocked by work |
+| `TestIdempotentAcceptance` (1) | two uploads of the same bytes get two ids and both complete | Independent documents |
+| `TestListing` (3) | recent documents are listed newest first; the `before` cursor paginates without repeats; `limit` is bounded (`0`/`101` -> 422) | The refresh-recovery endpoint and its cursor |
 
-The default integration run never calls a paid provider (the concurrency and live-AI tests are
-skipped without their flags): in `AI_MODE=fake` the AI parsers are deterministic stand-ins; in live
-mode the `gemini` test in this file would make real per-page calls, which is why the contract keeps
-the default stack in fake mode for test runs.
+The default API run never calls a paid provider (concurrency and live tests are skipped without
+their flags): in `AI_MODE=fake` the AI parsers are deterministic stand-ins; in live mode the
+`gemini` happy-path test would make real per-page calls, which is why CI runs fake mode.
+
+## Repository/lease suite - what each test proves
+
+14 tests in 5 classes against a real Redis; this is the automated version of what used to be
+exercised only by `scripts/resilience.sh`.
+
+| Class | Proves |
+|---|---|
+| `TestEnqueueAndRead` | acceptance writes job hash + stream entry + `docs:index` together; reads round-trip the hash, including the null encodings; `pending()` reports the right counts (the regression that crashed it) |
+| `TestLease` | the lease is exclusive (`SET NX`), a second owner is refused, renewal is token-fenced, release/expiry behave |
+| `TestFencedWrites` | `set_stage` and `save_pages` are rejected with a stale token, so a worker that lost the lease cannot mutate state |
+| `TestFencedCommit` | terminal commits are fenced by token, `XACK`+`XDEL` happen atomically with the state write, TTLs are applied, and a failed summary keeps the pages |
+| `TestRecoveryMechanics` | checkpoint/resume skips extraction, and `XAUTOCLAIM`-style reclaim can take over a pending entry after the idle threshold |
+
+Run command and prerequisites are above. Observed in this pass: **14 passed**.
+
+## Proxy e2e suite - what each test proves
+
+8 tests in 3 classes through nginx (`tests/e2e/test_proxy.py`); this is the path a browser actually
+takes.
+
+| Class | Proves |
+|---|---|
+| `TestShell` (3) | the SPA shell is served; every referenced hashed asset loads; an unknown SPA route falls back to `index.html` |
+| `TestApiThroughProxy` (4) | `/health` and `/api/v1/parsers` are proxied as JSON; an unknown document is a JSON `404` and does **not** fall through to the SPA; a full upload -> poll -> result works through nginx |
+| `TestProxyLimits` (1) | a 21 MB body is refused with `413` by nginx or the API (the 25 MB proxy cap / 20 MB API cap), not buffered and accepted |
+
+## Concurrency and live suites
+
+The 3 concurrency tests are described with their commands above. The 1 live-AI test is the only
+test that can call a paid provider; it is skipped without both a live stack and
+`RUN_LIVE_AI_TESTS=1`. Neither runs in CI - CI has no provider credentials and runs `AI_MODE=fake`.
+
+## Frontend suite - what each test proves
+
+29 vitest cases under `frontend/src/`:
+
+- `api.test.ts` (8): error-body flattening (FastAPI `detail[]`, plain `detail`, non-JSON, transport
+  errors) and parsing of the `GET /api/v1/documents` envelope + `before` cursor.
+- `polling.test.ts` (6): 1.5 s cadence, 3 s doubling backoff capped and never decreasing, terminal
+  statuses stop the chain, only 404/410 are fatal.
+- `recentDocuments.test.ts` (7): mapping a `DocumentSummary` onto card state, order preservation,
+  malformed-row skipping, polling only non-terminal rehydrated cards, merge behaviour.
+- `status.test.ts` (5): a label and CSS class for every wire status, only `completed`/`failed`
+  terminal, unknown statuses rejected.
+- `App.test.tsx` (3): the page rebuilds cards from `GET /api/v1/documents` on load, shows the
+  Recent documents heading, and degrades quietly when the list request fails.
+
+These are component/unit tests, not a browser test: layout and real interaction are still not
+automated.
 
 ## What is not covered
 
 Stated plainly, because a gap that is not named reads as a claim.
 
-- **No pytest test for crash recovery or fencing.** The three fault scenarios live in
-  `scripts/resilience.sh` (SIGKILL recovery, Redis restart with a backlog, stale-writer fencing),
-  not in the pytest suite: they are destructive, need a stack they can kill and restore, and run on
-  a short lease. They pass (5/5, 3/3, 6/6 checks in the ledger) and are documented in
-  [PERFORMANCE.md](PERFORMANCE.md), but `pytest` alone cannot prove recovery. There is also no
-  unit-level test for the fenced-write rejection path (stale token -> `False`) or for `LeaseLost`.
-- **The Redis-blip regression is not unit-tested.** The fix that a `RedisError` inside a commit must
-  defer the job instead of failing it permanently is only exercised by the Redis-restart fault
-  scenario; `tests/unit/test_hardening.py` covers the pacing/retry policy, not the worker's
-  `RedisError` branch.
-- **Load and performance are opt-in, not part of the default suite or CI.** `test_concurrency.py`
-  is skipped unless `RUN_CONCURRENCY_TESTS=1` (3 tests, 20-document bursts, `pypdf` only), and
-  `scripts/stress.py` is a manual gate. There is no CI job that runs either, no multiprocess worker
-  scaling test (`WORKER_CONCURRENCY > 8` is untested), and the measured numbers come from one
-  machine - treat the ratios as portable and the absolutes as indicative. There is no load test
-  against real AWS.
-- **No test for graceful drain.** SIGTERM draining (`worker_draining` -> finish or
-  `worker_shutdown_incomplete`) is implemented, but the fault script tests SIGKILL and `docker
-  pause`, not the shutdown path. The graceful path is reasoned about, not asserted.
-- **No automated memory-bound test.** The upload buffering bound (`MAX_BATCH_BYTES` x in-flight
-  requests) is measured manually in [PERFORMANCE.md](PERFORMANCE.md); nothing asserts it.
-- **The pacing layers are not behaviourally tested.** Retry-After parsing/clamping and the retry
-  delay are unit-tested, but the token bucket's actual requests-per-minute rate and the interaction
-  between `PROVIDER_MAX_CONCURRENCY`, `WORKER_CONCURRENCY` and the provider's limit are only
-  evidenced by the manual live run (unpaced failures vs 20/20 paced).
-- **No browser-level UI test.** The UI was verified over HTTP only (page, JS bundle, CSS return
-  `200`; the `/api` proxy works). Layout, interaction, and polling behaviour in a real browser are
-  unconfirmed (gap G3 in [REQUIREMENTS.md](REQUIREMENTS.md)).
-- **No automated dependency-outage tests** in `pytest`. `STORAGE_UNAVAILABLE`,
-  `QUEUE_UNAVAILABLE`, `503` readiness shapes, and Redis/S3 connection loss are not exercised by the
-  default suite; the Redis-restart case is covered by the destructive `scripts/resilience.sh redis`
-  scenario instead.
-- **Provider-error mapping is only partly tested.** `tests/unit/test_hardening.py` covers
-  `Retry-After` parsing, 429/503/401 mapping and the retry-delay policy offline; the SDK-facing
-  request/extraction code still has no tests, and the token bucket/timed pacing has none.
-- **No parser-level unit tests for error paths.** Encrypted PDFs (`ENCRYPTED_PDF`), page limits
-  (`TOO_MANY_PAGES`, `TOO_MANY_PAGES_FOR_AI`), text limits (`TOO_MUCH_TEXT`), invalid PDFs
-  (`INVALID_PDF`), and page-splitting failures are implemented but not covered by a test. Only the
-  `OCR_REQUIRED` path (blank sample) is asserted end to end.
-- **No test for `gpt-5-mini` beyond advertisement.** The registry now disables it unconditionally
-  (the `IMPLEMENTED = False` check runs before the fake-mode branch), and the integration suite
-  asserts that disabled parsers carry a reason; the parsing fallback error
-  (`PROVIDER_NOT_IMPLEMENTED`) is not reachable and not tested.
-- **No automated Terraform tests.** The infra tree is checked manually with
-  `terraform fmt -check -recursive` and `terraform validate` for both `infra/envs/local` and
-  `infra/envs/prod` (verified clean in this delivery), but there is no tflint/terraform-plan test,
-  no CI job, and no automated drift test. The local apply and drift healing were verified manually
-  through `docker compose up`; the production environment was validated only, never applied.
-  Terraform is not part of the pytest suite at all.
-- **No test for batch-size `413` (`MAX_BATCH_FILES`).** The single-file oversize path is covered;
-  the too-many-files path is not.
-- **No end-to-end retry-state test.** The retry-delay policy is unit-tested, but nothing asserts
-  that `status: "retrying"` is observable between attempts, or drives a document to
-  `ATTEMPTS_EXHAUSTED` / `DEADLINE_EXCEEDED`.
-- **No test for the 24 h result TTL expiry** (it would need a clock/time-travel or a shortened
-  configuration).
-- **Live provider behaviour only when a key is present.** Without a key the live test is skipped,
-  never passed; the suite cannot prove Gemini works in an environment with no credentials.
-- **No automated check that logs contain no document content, filenames, or secrets** - that is
-  enforced by code review and by the logging conventions, not by a test.
-- **Integration tests are black-box HTTP, not the contract's "own key prefix and bucket".**
-  [CONTRACT.md](CONTRACT.md) section 9 says integration tests must use their own key prefix/bucket
-  and never flush; the delivered tests never touch Redis directly and never flush, but because they
-  drive the public API they naturally create documents in the application's own namespace and
-  bucket (they expire via the result TTL). The "never flush" half holds; the "own namespace" half is
-  not applicable to an HTTP-level suite.
+- **No process-level fault automation in pytest.** The SIGKILL/Redis-restart/fencing scenarios are
+  `scripts/resilience.sh` (destructive shell, needs a disposable stack), not a pytest suite. The
+  repository suite covers the fencing *mechanics* in-process against real Redis, which is strong,
+  but nothing in `pytest` kills a worker process and watches a replacement reclaim it. The script
+  passed (5/5, 3/3, 6/6 checks) and found the transient-Redis-error bug.
+- **No live OpenAI call.** The adapter is implemented and unit-tested against a stub; a real
+  Responses-API call has never been made here (no `OPENAI_API_KEY`). Its live behaviour, latency
+  and error shapes beyond the stub's are unverified.
+- **No live provider in CI.** CI runs `AI_MODE=fake`; the live Gemini test is opt-in on a
+  developer machine and was verified there once (1 passed), not on every commit.
+- **Rate limiting and admission control are not asserted by a test.** The e2e suite tests the
+  25 MB body limit, not `limit_req`. The 429s and admission 503s are configuration plus manual
+  measurements (64 x 429 for a 150-request burst in the ledger; 90/200 in a documentation-pass
+  repeat). A runaway client hitting the limiter is not in the automatic suite.
+- **No queue-depth/admission load test in the default suite.** `scripts/stress.py` is a manual gate;
+  the concurrency tests are opt-in and only assert settlement, not the ceiling.
+- **No browser-level UI test.** The UI has vitest component tests and the 8 proxy e2e tests, but no
+  Playwright/Selenium run; layout and interaction are still unverified in a real browser
+  (REQUIREMENTS G3). The page was never opened visually here.
+- **No test of the `docs:index` retention window.** Listing order, pagination and `limit` bounds are
+  tested; pruning at 24 h and skipping expired hashes are not (they would need time travel or a
+  shortened TTL).
+- **No test for graceful drain (`worker_draining` / `worker_shutdown_incomplete`).** The fault
+  script covers SIGKILL and `docker pause`, not SIGTERM draining.
+- **No memory-bound assertion.** The upload-buffer ceiling is documented and measured manually, not
+  asserted.
+- **Pacing timing is not unit-tested.** Retry-After/clamp/jitter and the settings are covered; the
+  token bucket's actual RPM and the interaction of parser+summarizer pacers are evidenced only by
+  the manual live run.
+- **No parser error-path integration tests for PyPDF/Gemini.** Blank/`OCR_REQUIRED` is covered end
+  to end; encrypted PDFs, page limits, text limits and corrupt PDFs are unit/parser-level behaviour
+  without dedicated integration tests. The OpenAI parser's own error paths are unit-tested.
+- **No automated Terraform tests.** `fmt -check` and `validate` run in CI; `plan`/`apply` do not,
+  and production has never been applied.
+- **Integration tests are black-box HTTP, not the contract's "own key prefix and bucket".** They
+  drive the public API, create real documents, and never flush; the repository suite uses its own
+  unique stream keys. The "never flush" half holds.
+- **No automated check that logs contain no document content, filenames, or secrets** - enforced by
+  review and convention. The encoding gate and the CI secret grep cover adjacent risks, not log
+  content.
+- **No real-AWS load test.** All performance numbers come from one machine with LocalStack; treat
+  ratios as portable and absolutes as indicative.
 
 ## Manual end-to-end check
 
@@ -358,65 +373,21 @@ Stated plainly, because a gap that is not named reads as a claim.
 uploads `samples/sample-text.pdf` with `pypdf`, polls to terminal, and asserts: `completed`,
 `page_count >= 2`, pages ordered exactly 1..N, every page `format: "text"` and non-empty, exactly
 one non-empty summary; then it uploads the corrupt sample and asserts a `422` (or `202` with a
-`rejected[]`). Recorded ledger result: `Smoke test passed`. It is safe to re-run: it makes HTTP
-calls only and never mutates or flushes state.
+`rejected[]`). Recorded ledger result: `Smoke test passed`. It only makes HTTP calls and never
+mutates or flushes state.
 
-### Load harness - `scripts/stress.py`
+### Load and fault harnesses
 
-`scripts/stress.py` is the load harness (a manual gate, not part of pytest). It sends exactly
-`--docs` uploads through `--concurrency` parallel requests, polls every accepted document to a
-terminal state, and exits non-zero if any upload was not `202`, any 5xx occurred, any file was
-rejected, or any document failed or timed out. It needs `httpx`, so run it in the test image with
-`scripts/` and `samples/` mounted (both are dockerignored):
+- `scripts/stress.py` - bounded concurrent uploads, polls to terminal, exits non-zero on any
+  failure. Run in the test image with `scripts/` and `samples/` mounted; flags `--docs`,
+  `--concurrency`, `--parser`, `--poll-timeout`, `--request-timeout`, `--json-out`, `--label`.
+  Commands and the recorded numbers are in [RUNBOOK.md](RUNBOOK.md) section 11 and
+  [PERFORMANCE.md](PERFORMANCE.md).
+- `scripts/resilience.sh` - **destructive** fault injection (`crash`, `redis`, `fencing`, `all`);
+  prefer `WORKER_MODE=fake`; recorded 5/5, 3/3, 6/6. It exits non-zero on failure.
 
-```bash
-docker compose --profile test run --rm \
-  -v "$(pwd)/scripts:/app/scripts:ro" \
-  -v "$(pwd)/samples:/app/samples:ro" \
-  test python /app/scripts/stress.py --docs 200 --concurrency 200 --label burst
-```
-
-Useful flags: `--docs`, `--concurrency`, `--parser pypdf|gemini`, `--file`, `--poll-timeout`,
-`--request-timeout`, `--json-out PATH`, `--label`. It prints a one-line machine-readable summary
-prefixed `JSON ` (and writes the same object with `--json-out`), so it can be grepped as a gate.
-Exit codes: `0` clean, `1` failed run (reason on the `RESULT:` line), `2` CLI misuse.
-
-Throughput runs are repeatable when they hit a disposable fake-mode worker with a fixed
-`FAKE_DELAY_SECONDS`; the recipe is in [PERFORMANCE.md](PERFORMANCE.md) section 1:
-`docker compose stop worker`, then
-`docker compose run -d --name stress-w --no-deps -e AI_MODE=fake -e FAKE_DELAY_SECONDS=0.2 -e WORKER_CONCURRENCY=8 worker python -m app.worker`,
-run the harness, then `docker rm -f stress-w && docker compose start worker`.
-
-Recorded campaign numbers (coordinator-run; method in [PERFORMANCE.md](PERFORMANCE.md)): worker
-parallelism 1/4/8 -> 4.22/16.32/22.99 settled docs/s; client concurrency 1/10/50/100 -> 0 errors
-with p95 upload 9/88/651/802 ms; 200 concurrent uploads -> 200/200 accepted, 0 errors, 31.0 docs/s;
-50 x 200 KB all completed and 10 x 1 MB failed cleanly with `TOO_MUCH_TEXT` and 0 HTTP errors.
-
-### Fault injection - `scripts/resilience.sh`
-
-`scripts/resilience.sh` runs three destructive scenarios against a stack you can recreate: `crash`
-(SIGKILL a worker mid-job; a replacement must reclaim and finish it), `redis` (restart Redis with a
-30-document backlog; nothing may be lost) and `fencing` (`docker pause` a worker past its lease, let
-another worker finish, then unpause; the stale writer must not commit). `all` runs the three.
-
-```bash
-WORKER_MODE=fake ./scripts/resilience.sh all      # costs no API quota; recommended
-./scripts/resilience.sh crash                     # one scenario only
-```
-
-- `WORKER_MODE=fake` starts disposable fake-mode workers; the default is `live`, which uses the real
-  providers. `LEASE_SECONDS` (default 15) / `HEARTBEAT_SECONDS` (default 5) make recovery observable
-  in seconds; `RECOVERY_TIMEOUT` (default 180 s) bounds each check. It needs docker + curl and no jq,
-  restores the normal worker on exit via a trap, and exits non-zero if any check fails - so it is
-  usable as a gate.
-- Recorded results (coordinator-run): crash 5/5, redis 3/3 (30/30 completed, 0 lost), fencing 6/6
-  (the resumed zombie detected its lost lease and could not overwrite the completed document). This
-  campaign is what found the transient-Redis-error classification bug, now fixed. See
-  [PERFORMANCE.md](PERFORMANCE.md) section 5.
-
-These two harnesses were **not re-run during this documentation pass** (destructive/load); their
-results are the coordinator's, recorded in [PROGRESS.md](PROGRESS.md) and
-[PERFORMANCE.md](PERFORMANCE.md).
+Neither harness was re-run during this documentation pass (destructive/load); their results are the
+coordinator's, recorded in [PROGRESS.md](PROGRESS.md) and [PERFORMANCE.md](PERFORMANCE.md).
 
 ### Standalone delivery check (clean extraction) - verified
 
@@ -437,10 +408,10 @@ through the Compose environment passthrough:
 - The UI served `200` on `/` and on `/api/v1/parsers`.
 
 Terraform static checks verified during this documentation pass with a direct `docker run` of the
-pinned image against the working tree: `terraform fmt -check -recursive` -> clean; `terraform
-validate` for both `infra/envs/local` and `infra/envs/prod` -> `Success! The configuration is
-valid.` Drift healing (`down -v` with state intact -> bucket re-created, readiness `200`) was
-verified by the coordinator. The production environment is validated only, not applied.
+pinned image against the working tree: `terraform fmt -check -recursive` -> clean;
+`terraform validate` for both `infra/envs/local` and `infra/envs/prod` -> `Success! The
+configuration is valid.` Drift healing (`down -v` with state intact -> bucket re-created, readiness
+`200`) was verified by the coordinator. The production environment is validated only, not applied.
 
 Documented defaults on a clean host were also verified by the coordinator: after removing 18 stale
 containers from unrelated projects (no volumes touched), the stack ran on its documented defaults -
@@ -452,3 +423,12 @@ to the default did the same in reverse. That is a rename (destroy + recreate), n
 This is the reviewer-machine check: only Docker + Compose v2 required. Terraform runs inside a
 container, so there is no Terraform install, no AWS account and no cloud credentials for the local
 demo, and no local Python/Node install.
+
+## Quality gates
+
+The quality gates are not part of `pytest`: `ruff check`, `ruff format --check`, `mypy`, the
+UTF-8 encoding check (`scripts/check_encoding.py`), the CI secret grep, the frontend `tsc`/`npm
+test`/`npm run build`, and Terraform `fmt`/`validate` all run in `.github/workflows/ci.yml`. The
+commands to reproduce them locally are in [RUNBOOK.md](RUNBOOK.md) section 12. Dependency builds
+use the committed `requirements.lock.txt` / `requirements-dev.lock.txt` (generated with `pip
+freeze` from the verified image); `requirements*.txt` are the human-edited intent.

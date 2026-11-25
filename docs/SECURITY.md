@@ -34,8 +34,13 @@ Consequences:
   **unguessability, not authorization**. An id leaked through a URL, a screenshot, a log paste, or
   a shared browser session is sufficient to read the document; there is no second factor and no
   revocation. Treat ids as bearer tokens for their own result.
-- There is no rate limiting, no quota, and no upload cap per client beyond the per-request limits
-  (5 files / 20 MB each / 50 MB per batch).
+- **`GET /api/v1/documents` removes even the guessability argument.** The listing endpoint returns
+  the most recent documents (ids, filenames, parser, status, page count) newest first to any
+  unauthenticated caller. Knowing an id was never the protection, but enumerating recent documents
+  is now a single request. Assume anyone who can reach the port can discover recent uploads.
+- There is no per-user quota. There are two protective layers, but neither is authentication:
+  nginx per-IP request-rate limits on the UI origin, and an in-process admission limit on
+  simultaneous uploads (below and in [API.md](API.md#limits)).
 - `/docs` (Swagger UI) is open too, which is useful for a reviewer and unacceptable in production.
 
 CSRF is moot in the ordinary sense (there is no authenticated session to abuse), but note that any
@@ -44,37 +49,45 @@ is running. This only matters on a shared machine.
 
 ### Availability, cost, and blast radius
 
-The load campaign measured what an unauthenticated caller can do, and it is a mixed finding: good
-for throughput, bad for cost control.
+The load campaign measured what an unauthenticated caller can do, and the hardening round added
+two controls. The picture is better than "no controls", still far from a quota.
 
-- **The API has no admission control.** 200 simultaneous uploads were accepted with **0 errors**
-  while the worker was saturated ([PERFORMANCE.md](PERFORMANCE.md)): there is no queue-depth cap, no
-  per-client rate limit, and no backpressure toward the client. A local process (any process on the
-  trusted host) can enqueue unbounded work, fill the Redis stream, grow LocalStack/disk usage, and
-  keep the single worker busy indefinitely. The worker's bounded concurrency keeps memory per
-  process predictable, not the backlog.
+- **Rate limiting and admission control (new).** nginx `limit_req` applies per client IP: 20 r/s
+  with burst 40 on `/api/v1/documents` (uploads and listing) and 100 r/s with burst 200 on the rest
+  of `/api/`, answering `429` with a JSON `RATE_LIMITED` body. The API adds an admission semaphore:
+  at most `MAX_CONCURRENT_UPLOADS` (16) uploads buffer at once, and a request waits up to 10 s for
+  a slot before a `503` + `Retry-After`. Both are **blast-radius controls, not authorization**:
+  - per-IP, not per user/account - clients behind one NAT share a bucket, and there are no
+    accounts to scope to;
+  - the nginx limits only exist on the UI origin; a caller who can reach `:8000` bypasses them
+    (admission control still applies, because it is in the API process);
+  - admission is per API process, not cluster-wide, and bounds buffered uploads, not queue depth.
+  Measured: a 150-request burst from one IP through nginx produced 64 `429`s with the documented
+  body (coordinator-run); a documentation-pass repeat with 200 rapid `GET`s produced 90 `429` /
+  110 `200`. A caller who stays under the rate can still enqueue unbounded work.
 - **Denial of service is cheap; loss of data is not the risk.** A flood delays legitimate documents
   (no fairness) and consumes Redis/S3 space for results that expire after 24 h. It does not corrupt
   completed results: those are fenced, and the fault scenarios prove a stale writer cannot overwrite
   them.
-- **The provider key is the expensive asset.** Every accepted AI job costs one call per page plus
-  one summary call. The client-side pacing layers (`PROVIDER_MAX_CONCURRENCY`, and
-  `PROVIDER_MAX_REQUESTS_PER_MINUTE` when set) bound the request *rate* per worker process, and
-  `Retry-After`/jitter bound how rudely a rate limit is retried - but the default
-  `PROVIDER_MAX_REQUESTS_PER_MINUTE=0` **disables the RPM cap**. With a leaked key and no RPM limit,
-  an attacker can drive requests at the worker-concurrency/provider-latency rate (measured live
-  baseline: 1.4 docs/s at concurrency 5, i.e. a few calls per second), not at a published-plan
-  quota. Pacing is a blast-radius reduction, not a spend control: it reduces the rate of damage and
-  keeps legitimate bursts succeeding, and it is **per process**, so multiple worker replicas
-  multiply the effective RPM.
+- **The provider keys are the expensive assets.** Every accepted AI job costs one call per page
+  plus one Gemini summary call. The client-side pacing layers (`PROVIDER_MAX_CONCURRENCY`, and
+  `PROVIDER_MAX_REQUESTS_PER_MINUTE` when set) bound the request *rate* per **provider client
+  instance** (a worker can hold a Gemini parser client, a Gemini summarizer client and an OpenAI
+  client, each with its own pacer), and `Retry-After`/jitter bound how rudely a rate limit is
+  retried - but the default `PROVIDER_MAX_REQUESTS_PER_MINUTE=0` **disables the RPM cap**. With a
+  leaked key and no RPM limit, an attacker can drive requests at the worker/provider-latency rate
+  (measured live baseline: 1.4 docs/s at concurrency 5, i.e. a few calls per second), not at a
+  published-plan quota. Pacing is a blast-radius reduction, not a spend control; multiple worker
+  processes multiply the effective RPM.
 - **Memory is bounded by upload buffering, not by queue depth.** Uploads are buffered before the S3
-  write, so in-flight uploads x `MAX_BATCH_BYTES` is the API memory ceiling; a sustained flood of
-  maximum-size batches is the one way to exhaust it (documented in
-  [PERFORMANCE.md](PERFORMANCE.md) known limits). The worker holds each in-flight document's PDF and
-  extracted pages, multiplied by `WORKER_CONCURRENCY`.
+  write, so `MAX_CONCURRENT_UPLOADS` x `MAX_BATCH_BYTES` is the API memory ceiling (the admission
+  semaphore exists precisely because of this; the unit tests pin the default worst case at
+  16 x 50 MB). The worker holds each in-flight document's PDF and extracted pages, multiplied by
+  `WORKER_CONCURRENCY`.
 - **Operational guidance for the demo:** set `PROVIDER_MAX_REQUESTS_PER_MINUTE` to the provider's
-  published limit even locally, keep the key short-lived/rotated, and do not expose the ports beyond
-  loopback. In production, quotas and spend caps belong in front of this (see section 10).
+  published limit even locally, keep both keys short-lived/rotated, do not expose the ports beyond
+  loopback, and treat the nginx limits as the only thing between a script and the API. In
+  production, per-account quotas and spend caps belong in front of this (see section 10).
 
 ## 3. PDFs are untrusted input
 
@@ -129,25 +142,33 @@ What is **not** mitigated, and should be stated rather than implied:
 
 ## 5. Credential handling
 
-- `GEMINI_API_KEY` (and the unused `OPENAI_API_KEY`) live only in the local `.env` (or the shell
-  environment passed through Compose). `.env` is in `.gitignore` and `.dockerignore`, and
-  `.env.example` ships with the key empty. The delivered archive does not include `.env`; the
-  packaging script excludes it.
-- The key is passed to the `api` and `worker` containers as an environment variable; that is the
-  only place it exists.
-- The key is **never sent to the browser**. The React bundle is static and calls relative
+- Two provider credentials are now real: `GEMINI_API_KEY` (markdown extraction + the mandatory
+  summary) and `OPENAI_API_KEY` (the GPT-5 Mini parser). They live only in the local `.env` (or the
+  shell environment passed through Compose). `.env` is in `.gitignore` and `.dockerignore`, and
+  `.env.example` ships with both keys empty. In this environment only the Gemini key exists, so the
+  OpenAI parser is reported disabled rather than advertised.
+- The keys are passed to the `api` and `worker` containers as environment variables; that is the
+  only place they exist.
+- The keys are **never sent to the browser**. The React bundle is static and calls relative
   `/api/v1/...` URLs; there is no base URL, no key, and no server-side injection of secrets into
   HTML. Verified by scanning the built bundle (`frontend/dist/assets/*.js`, `index.html`) for
   `AIza...`-shaped keys and for `GEMINI_API_KEY` / `OPENAI_API_KEY`: no matches.
-- The key is **never logged**. Startup logs the model name and `ai_mode`, not credentials; parser
-  and worker logs contain ids, codes, page counts and durations. Provider error messages are
+- The keys are **never logged**. Startup logs the model names and `ai_mode`, not credentials;
+  parser and worker logs contain ids, codes, page counts and durations. Provider error messages are
   rewritten into stable generic messages (`PROVIDER_CONFIG` says "check the API key and model
   name", and does not echo either).
 - LocalStack credentials are literally `test`/`test`. They are not secrets and would be invalid
   against real AWS; this is why the endpoint is overridden to LocalStack.
+- **Packaging caveat (honest):** `.gitignore` ignores `.env` and every `.env.*` variant, and the
+  delivery packer (`scripts/package.py`) explicitly excludes a file named exactly `.env`. It does
+  **not** exclude other variants: a stray `.env.bak`/`.env.old` in the repository root would be
+  packaged because the packer walks the filesystem rather than asking git. Treat the archive as
+  untrusted until you have confirmed no env backup exists (or extend the packer's exclusion to
+  `.env*` with the `.env.example` exception). This is a packaging risk, not an application one: the
+  Docker image ignores `.env.*` at build time.
 - If a real key is used for a demo, remember it was typed into `.env`: rotate it afterwards if the
   machine or recording was shared. Nothing in the app makes it easy to leak; nothing in the app
-  protects it either.
+  protects it either. Two keys now need rotating, not one.
 
 ## 6. Network exposure
 
@@ -222,19 +243,21 @@ Two honest caveats:
 | Loopback-only ports | `compose.yaml` (`127.0.0.1:...` binds) and `docker compose ps` during this pass |
 | Redis not published | `compose.yaml` redis service has no `ports` mapping; verified in `docker compose ps` output (`6379/tcp` internal only) |
 | No key in the browser bundle | Pattern scan of `frontend/dist/assets/*.js` and `index.html` for key shapes and key env names: no matches |
-| `.env` excluded from images and archives | `.gitignore` (`.env`, `.env.*`, `! .env.example`), `.dockerignore` (`.env`, `.env.*`) |
-| No key in logs | Startup and per-job log statements read; only `ai_mode`, model name, ids, parser, byte counts, codes, durations are logged |
-| Error responses contain no stack traces / provider payloads | Error construction read (`app/processing.py`, `app/providers/gemini.py`); integration test asserts no `Traceback` for `OCR_REQUIRED`; live rejection bodies examined |
-| Prompt-injection framing, no tools | Prompts and the client call in `app/providers/gemini.py`; no function/tool declarations anywhere; model output rendered through sanitized markdown (`MarkdownView.tsx`) |
+| `.env` excluded from images | `.gitignore` (`.env`, `.env.*`, `! .env.example`) and `.dockerignore` (`.env`, `.env.*`). `scripts/package.py` excludes only a file named exactly `.env`, so an `.env.bak`-style variant would be packaged - see the packaging caveat in section 5 |
+| No key in logs | Startup and per-job log statements read; only `ai_mode`, model names, ids, parser, byte counts, codes, durations are logged |
+| Error responses contain no stack traces / provider payloads | Error construction read (`app/processing.py`, `app/providers/gemini.py`, `app/providers/openai_adapter.py`); integration test asserts no `Traceback` for `OCR_REQUIRED`; live rejection bodies examined |
+| Prompt-injection framing, no tools | Prompts and client calls in both provider modules; no function/tool declarations anywhere; model output rendered through sanitized markdown (`MarkdownView.tsx`) |
 | Parser runs unsandboxed in the worker | `app/processing.py` calls the parser in-process; isolation is the container, running as non-root (`Dockerfile` `USER appuser`) |
 | Terraform state, provider cache and `tfvars` are not committed | `.gitignore` (`infra/**/*.tfstate`, `infra/**/.terraform/`, `infra/**/*.tfvars` with the `.example` exception), `.dockerignore` (`infra`), `scripts/package.py` exclusions |
 | Terraform tree is formatted and valid | `terraform fmt -check -recursive` clean; `terraform validate` for `infra/envs/local` and `infra/envs/prod` both valid (run in this pass) |
 | Local bucket is private and versioned | the provisioner applied the S3 module locally (3 resources: bucket, public-access block, versioning); state inspected in this pass |
 | Production posture | code read and `terraform validate` only; **not applied**, nothing observed in AWS |
-| Unauthenticated load accepted | 200/200 simultaneous uploads accepted with 0 HTTP errors while the worker was saturated (coordinator-run, [PERFORMANCE.md](PERFORMANCE.md)) |
+| Rate limiting and admission control exist | code read (`frontend/nginx.conf` http-context `limit_req` zones; `app/api/documents.py` admission semaphore) and live measurement: a 200-request burst through nginx returned 90 x `429` / 110 x `200`; the ledger records 64 x `429` for a 150-request coordinator burst |
+| The listing endpoint enumerates recent documents unauthenticated | live `GET /api/v1/documents?limit=2` returned ids, filenames and statuses with no credentials |
+| Provider keys are gated and unexposed | live `/api/v1/parsers` shows `gpt-5-mini` disabled with "OPENAI_API_KEY is not configured"; registry matrix reproduced in-process; bundle scan found no key patterns |
 | Provider pacing bounds a burst | unpaced 20-document live burst failed documents with `PROVIDER_ERROR` after 429/503; paced at 20 RPM it completed 20/20 (coordinator-run) |
-| Pacing defaults are off for RPM | code read (`PROVIDER_MAX_REQUESTS_PER_MINUTE=0` disables the token bucket) and unit-tested defaults (`tests/unit/test_hardening.py`) |
-| Memory bound is documented, not enforced by a limit | upload buffering explained in [ARCHITECTURE.md](ARCHITECTURE.md) section 10; measured memory in [PERFORMANCE.md](PERFORMANCE.md) |
+| Pacing defaults are off for RPM and per client instance | code read (`ProviderPacer` per client instance) and unit-tested defaults (`tests/unit/test_hardening.py`) |
+| Memory bound is documented and unit-pinned | `MAX_CONCURRENT_UPLOADS` x `MAX_BATCH_BYTES` = 16 x 50 MB asserted in `test_hardening.py`; architecture in ARCHITECTURE section 10 |
 
 ## 10. What production would require
 
@@ -243,10 +266,11 @@ safely accept untrusted files from untrusted users:
 
 1. **Authentication and authorization.** Real identity, per-tenant ownership on documents, and
    object-level checks on every read/download. UUIDs would become lookup keys, not bearer tokens.
-2. **Quotas and abuse controls.** Per-client rate limits, upload quotas, concurrent-job caps,
-   queue-depth admission control, and provider spend caps/alerts. The application currently has none:
-   200 concurrent unauthenticated uploads are accepted, and pacing (when configured) is a per-process
-   rate cap, not an account quota.
+2. **Quotas and abuse controls.** Per-account and per-tenant rate limits, upload quotas,
+   concurrent-job caps, queue-depth admission control, and provider spend caps/alerts. The current
+   controls are per-IP at the proxy (bypassable via the direct API port) and a per-process admission
+   semaphore (16 uploads); neither is an account quota or a queue cap.
+   The listing endpoint would need tenant scoping so it does not enumerate every tenant's documents.
 3. **Malware scanning and sandboxed conversion.** Antivirus/CDR before parsing, and the parser in a
    separate low-privilege service (seccomp, no network egress, memory/CPU limits, timeouts) rather
    than inside the worker process.
@@ -257,7 +281,9 @@ safely accept untrusted files from untrusted users:
    (SSE-KMS), per-tenant prefixes, and an orphan-reconciliation job that closes the S3/Redis
    non-transactional window.
 6. **Secret management.** A secret manager with rotation (not `.env`), separate keys per
-   environment, and no long-lived keys in container environments where possible.
+   environment and per provider (`GEMINI_API_KEY`, `OPENAI_API_KEY`), and no long-lived keys in
+   container environments where possible. CI already greps for credential-shaped strings; keep
+   that gate and scan the delivery archive for `.env*` files as well.
 7. **Hardened Redis.** `requirepass`/ACL, TLS, private networking, persistence/backup policy, and a
    design that does not depend on single-instance `WATCH`/`MULTI` if Redis Cluster is required.
 8. **Audit logging and observability** with content-free events (who uploaded/read which document
