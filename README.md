@@ -153,13 +153,18 @@ GEMINI_API_KEY=AIza... docker compose up --build -d
 $env:GEMINI_API_KEY="AIza..."; docker compose up --build -d
 ```
 
+With no `.env` present, `AI_MODE` falls back to `live`, so this is enough. If you have already copied
+the template (which sets `AI_MODE=fake`), pass `AI_MODE=live` alongside the key.
+
 **Option 2 — put it in `.env`:**
 
 ```bash
 cp .env.example .env
 ```
-Then set the one line (any editor: `notepad .env`, `nano .env`, VS Code):
+The template ships with `AI_MODE=fake` so the stack is healthy without credentials. For real calls,
+set **two** lines (any editor: `notepad .env`, `nano .env`, VS Code):
 ```dotenv
+AI_MODE=live
 GEMINI_API_KEY=AIza...
 ```
 and start:
@@ -172,14 +177,14 @@ Either way, confirm:
 curl -fsS http://localhost:8000/health/ready    # 200, summarizer: gemini:<model>
 ```
 
-### No key? Everything still runs, labelled
+### No key? Everything still runs, labelled (this is the default)
 
 ```bash
-cp .env.example .env      # then set:  AI_MODE=fake
+cp .env.example .env          # AI_MODE=fake is already set in the template
 docker compose up --build -d
 ```
 Fake mode is deterministic, makes no network calls, and says so everywhere (API, UI banner,
-document warnings, summary text). Nothing is hidden.
+document warnings, summary text). Nothing is hidden, and `/health/ready` is `200`.
 
 Then:
 
