@@ -48,9 +48,11 @@ class Settings(BaseSettings):
     max_ai_pages: int = 20
     max_extracted_chars: int = 200_000
     provider_timeout_seconds: float = 60.0
-    # Cap simultaneous provider calls per process. Each in-flight job makes one call at a time, so
-    # this is normally bounded by worker_concurrency; it exists so a future per-page concurrency
-    # bump cannot silently multiply the request rate.
+    # Cap simultaneous provider calls per client instance. Pacing lives in ProviderPacer, and each
+    # client gets its own (Gemini parser, Gemini summarizer, OpenAI parser), so the effective ceiling
+    # per process is this value times the number of active clients. Each in-flight job makes one call
+    # at a time, so it is normally bounded by worker_concurrency; the cap exists so a future per-page
+    # concurrency bump cannot silently multiply the request rate.
     provider_max_concurrency: int = 4
     # Client-side rate limit for provider calls, in requests per minute. 0 disables it. Set it to
     # your provider's published limit (free tiers are single-digit RPM) instead of discovering it
@@ -124,7 +126,12 @@ class Settings(BaseSettings):
 
     @property
     def ai_available(self) -> bool:
-        """Only meaningful in live mode; fake mode is always 'available'."""
+        """Whether summarization is possible; fake mode always is.
+
+        Summarization is Gemini-only by contract, so this deliberately checks the Gemini key even
+        though `gpt-5-mini` is now implemented: an OpenAI key alone cannot summarize a document.
+        Extraction availability is the registry's job, not this flag's.
+        """
         if self.ai_mode == "fake":
             return True
         return bool(self.gemini_api_key)

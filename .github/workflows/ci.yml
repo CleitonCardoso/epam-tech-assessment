@@ -14,6 +14,10 @@ env:
   # mode. Nothing here pretends to exercise Gemini/OpenAI.
   AI_MODE: fake
   DOCKER_BUILDKIT: "1"
+  # The container runs as uid 10001 and the runner checkout belongs to uid 1000, so tool caches must
+  # not be written next to the source. This bit the first CI run: ruff died with "Failed to
+  # initialize cache at /src/.ruff_cache: Permission denied".
+  RUFF_CACHE_DIR: /tmp/ruff-cache
 
 jobs:
   quality:

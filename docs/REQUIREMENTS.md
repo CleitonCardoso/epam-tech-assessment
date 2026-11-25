@@ -50,7 +50,7 @@ Status vocabulary, used strictly:
 | # | Requirement (quote) | Where | Evidence | Status |
 |---|---|---|---|---|
 | D1 | "Start with the backend part" | — | Full backend + worker + tests; UI is a thin single screen | **MET** |
-| D2 | "API should take the uploaded PDF, and the desired parser value - PyPDF, Google Gemini Flash or GPT-5 Mini" | `ParserId`, `registry.py` | `pypdf` and `gemini` accepted; `gpt-5-mini` accepted as a name but always refused with an explanatory `503` | **PARTIAL** — G2 |
+| D2 | "API should take the uploaded PDF, and the desired parser value - PyPDF, Google Gemini Flash or GPT-5 Mini" | `ParserId`, `registry.py` | All three accepted: `gpt-5-mini` is implemented and runs when `OPENAI_API_KEY` is set, otherwise it is refused with an explanatory `503` | **MET** — G2 |
 | D3 | "parse and store in Redis the resulting markdown and a summary" | `app/storage/jobs.py` | `docs:pages:<id>` (JSON, per-page `format`+`content`), `docs:summary:<id>`, `docs:job:<id>` hash; TTL on all three at terminal state | **MET** |
 | D4 | "For the summary, just use gemini-3.1-flash-lite" | `GeminiSummarizer` | Always Gemini, never a second provider; prompts delimit pages and treat content as untrusted. Live-verified: the returned summary was real prose about the page content, not the stand-in | **MET** — live-verified (G1) |
 | D5 | "acceptable to demo … using Postman or CURL" | `/docs`, `scripts/smoke.sh` | Swagger UI + `smoke.sh` (asserts ordering, page count, summary) — `Smoke test passed` | **MET** |
@@ -156,5 +156,5 @@ untrusted binaries is not a defensible default, so the bounds are explicit and c
   re-extracting.
 - **Honest failure taxonomy**: `PermanentError` vs `TransientError`, bounded retries, stable
   client-facing error codes, no stack traces in API output.
-- **Load and fault testing** (requested after the assessment scope): `scripts/stress.py` measured 200 concurrent uploads with zero errors, worker parallelism from 4.2 to 23.0 docs/s, and three fault scenarios (worker SIGKILL, Redis restart, stale-writer fencing) all pass. Report: `docs/PERFORMANCE.md`; ledger: `docs/PROGRESS.md`. In total: **49 automated checks** run by default (28 unit offline, 13 integration, 8 proxy-level e2e) plus 4 opt-in (3 concurrency, 1 live provider), a repeatable smoke script and a
+- **Load and fault testing** (requested after the assessment scope): `scripts/stress.py` measured 200 concurrent uploads with zero errors, worker parallelism from 4.2 to 23.0 docs/s, and three fault scenarios (worker SIGKILL, Redis restart, stale-writer fencing) all pass. Report: `docs/PERFORMANCE.md`; ledger: `docs/PROGRESS.md`. In total: **111 automated checks** (44 unit offline, 16 API integration, 14 repository/lease, 8 proxy-level e2e, 29 frontend vitest) plus 4 opt-in (3 concurrency, 1 live provider), a repeatable smoke script and a
   packaging verifier.

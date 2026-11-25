@@ -1,4 +1,4 @@
-﻿# PROGRESS â€” live status board and verification ledger
+# PROGRESS — live status board and verification ledger
 
 **Read this first if you are an agent joining the work.** Updated by the coordinator as work
 lands. Contract: `docs/CONTRACT.md`. Plan review: `docs/DECISIONS.md`.
@@ -14,7 +14,7 @@ Last update: 2026-11-25, integration complete.
 | Queue: consumer group, read, claim, ack | coordinator | done |
 | Processing + worker (lease, heartbeat, bounded retries) | coordinator | done |
 | API (`main.py`, `api/documents.py`, `registry.py`) | coordinator | done |
-| PyPDF parser + fake providers | providers (conflict â€” see below) | done |
+| PyPDF parser + fake providers | providers (conflict — see below) | done |
 | Gemini client + per-page markdown parser | coordinator | done |
 | Docker / Compose / LocalStack init | infra | done, 3 fixes by coordinator |
 | React UI | frontend | done, container build verified by coordinator |
@@ -34,7 +34,7 @@ The coordinator's four docs are the authoritative record (contract, decisions, r
 traceability, verification ledger). The docs agent's set is derived from the code and must never
 contradict them; if it finds a contradiction, it reports it instead of smoothing it over.
 
-## Verified â€” executed, not assumed
+## Verified — executed, not assumed
 
 Every line below was run in this environment on 2026-11-25.
 
@@ -45,9 +45,9 @@ Every line below was run in this environment on 2026-11-25.
 | Stack health | `docker compose ps` | redis/localstack/api healthy, worker up |
 | Readiness | `GET /health/ready` | `200`, `redis ok`, `bucket 'documents' ok`, `ai_mode fake` |
 | Parser inventory | `GET /api/v1/parsers` | pypdf+gemini enabled, notes state fake mode honestly |
-| pypdf end to end | upload â†’ poll | `completed`, 2 ordered `text` pages, real extracted text |
-| gemini end to end | upload â†’ poll | `completed`, `markdown` pages, fake warning attached |
-| Blank PDF | upload â†’ poll | `failed`, `OCR_REQUIRED`, `retryable: false` |
+| pypdf end to end | upload → poll | `completed`, 2 ordered `text` pages, real extracted text |
+| gemini end to end | upload → poll | `completed`, `markdown` pages, fake warning attached |
+| Blank PDF | upload → poll | `failed`, `OCR_REQUIRED`, `retryable: false` |
 | Corrupt PDF | upload | `422`, `rejected[].code = NOT_A_PDF` |
 | Batch independence | valid + corrupt | `202`, valid completes, corrupt in `rejected[]` |
 | Unknown parser | upload | `422` with the allowed values |
@@ -56,24 +56,24 @@ Every line below was run in this environment on 2026-11-25.
 | Oversized file (21 MB) | upload | `413` |
 | UI + proxy | `GET :3000/`, `:3000/api/v1/parsers` | `200`, proxy reaches the API |
 | Concurrency | 8 s job in flight | `/health/live` 3.7 ms, `GET` 6.1 ms, second `POST` 10.7 ms |
-| Unit suite | `docker compose --profile test run --rm test` | **14 passed, 13 deselected** in 0.35 s (that was the count then; the suite is **28** after the hardening tests - see the load/fault rows) |
+| Unit suite | `docker compose --profile test run --rm test` | **14 passed, 13 deselected** in 0.35 s (historical; the suite is **44** after the hardening and OpenAI tests) |
 | Integration suite | `... pytest tests/integration -m integration -q` | **13 passed** in 2.28 s (now 13 passed + 4 skipped: the concurrency and live suites are opt-in) |
 | Smoke script | `bash scripts/smoke.sh` | `Smoke test passed` |
 | Registry wiring | live+key / live no-key / fake | gemini enabled / disabled with reason / stand-ins |
-| OpenAI gating | live mode + `OPENAI_API_KEY` set | still `enabled: false`, note "not implemented in this delivery" |
+| OpenAI gating | live mode + `OPENAI_API_KEY` set | historical: that was before GPT-5 Mini was implemented. Now `enabled: true` with a key, `false` + "OPENAI_API_KEY is not configured" without one |
 | Source archive | `py -3 scripts/package.py` | 65 files, 0.13 MB, written to `dist/` inside the repo, no excluded paths, reads back cleanly |
-| Archive self-sufficiency | extract to clean dir â†’ `pytest -m "not integration"` | **14 passed** from the extracted copy |
-| Cold start | `docker compose down -v` â†’ `up -d --build` | all services healthy; at that time the bucket was created by the (since removed) ready hook - see the Terraform rows below |
+| Archive self-sufficiency | extract to clean dir → `pytest -m "not integration"` | **14 passed** from the extracted copy |
+| Cold start | `docker compose down -v` → `up -d --build` | all services healthy; at that time the bucket was created by the (since removed) ready hook - see the Terraform rows below |
 | UI bundle | `GET :3000/` + every referenced asset | `200` for `index-RqDuwbqT.js` (281 KB) and `index-BcaXcX44.css` (12 KB) |
 | UI contract | `useDocumentPolling.ts`, `api.ts` | polls at 1500 ms, stops on `isTerminal`, backs off; sends repeated `files` + one `parser` |
-| **Live Gemini** | `RUN_LIVE_AI_TESTS=1 pytest tests/integration/test_live_ai.py` | **1 passed in 12.58 s** â€” real per-page markdown + a genuine summary (no stand-in warning) |
+| **Live Gemini** | `RUN_LIVE_AI_TESTS=1 pytest tests/integration/test_live_ai.py` | **1 passed in 12.58 s** — real per-page markdown + a genuine summary (no stand-in warning) |
 | **Live full suite** | integration suite with `AI_MODE=live` | **13 passed, 1 skipped** in 25.99 s (the live test skips without its flag) |
 | Live document | `parser=gemini`, `sample-text.pdf` | `completed`, 2 `markdown` pages, summary about site/water/maintenance |
 | Credential shape | `list_models` with the real key | authenticates: 60 models, 48 Gemini, `gemini-3.1-flash-lite` present |
 | **Terraform static checks** | `fmt -check -recursive` + `validate` (local and prod) | `FMT: clean`, both environments `Success! The configuration is valid.` |
-| **Terraform apply (local)** | `docker compose up` â†’ provisioner service | 3 resources added (bucket, public-access block, versioning); API/worker start only after it exits 0 |
-| **Drift healing** | `down -v` with state intact â†’ `up` | Terraform refreshed, saw the bucket missing, re-created it (`3 added`); readiness back to `200` |
-| OpenAI gating | live mode + `OPENAI_API_KEY` set | still `enabled: false`, "not implemented in this delivery" |
+| **Terraform apply (local)** | `docker compose up` → provisioner service | 3 resources added (bucket, public-access block, versioning); API/worker start only after it exits 0 |
+| **Drift healing** | `down -v` with state intact → `up` | Terraform refreshed, saw the bucket missing, re-created it (`3 added`); readiness back to `200` |
+| OpenAI gating | live mode without a key, then with one | **historical**: at that time `gpt-5-mini` was unimplemented and reported `enabled: false`. It is now implemented: `enabled: true` with `OPENAI_API_KEY`, `false` + "OPENAI_API_KEY is not configured" without one |
 | Production topology | `docker compose -f compose.prod.yaml config -q` | exit 0; services are exactly redis, api, worker, frontend - no LocalStack, no provisioner |
 | **Worker parallel scaling** | stress at WORKER_CONCURRENCY 1/4/8 (40 docs, fake 200ms) | 4.22 / 16.32 / 22.99 settled docs per second, 40/40 completed each time |
 | **Client concurrency** | 100 docs at client concurrency 1/10/50/100 | 0 errors at every level; p95 upload 9 / 88 / 651 / 802 ms |
@@ -102,12 +102,12 @@ Every line below was run in this environment on 2026-11-25.
    `app/parsers/pypdf_parser.py` and `app/providers/fake.py`; theirs landed last. I kept their
    implementations (they are fine) and patched one honesty gap: the fake output was unlabelled,
    so `ParseResult.warnings` now carries `FAKE_WARNING` and the summary header says
-   `(fake mode) â€¦ no model was called`. I then took over `gemini.py`/`gemini_parser.py` and told
+   `(fake mode) … no model was called`. I then took over `gemini.py`/`gemini_parser.py` and told
    them to stop to avoid a second collision.
 2. **PyPDF was advertised as a fake.** `registry.describe()` prefixed the "deterministic
    stand-in" note to every parser in fake mode, including the real local extractor. Fixed: the
    note only applies to parsers that require an API key.
-3. **`GET /api/v1/documents/{id}` returned 500.** `DocumentDetail(**job.model_dump(), warnings=â€¦)`
+3. **`GET /api/v1/documents/{id}` returned 500.** `DocumentDetail(**job.model_dump(), warnings=…)`
    passed `warnings` twice. Fixed with `exclude={"warnings"}`.
 4. **Compose healthcheck was on `/health/ready`.** In live mode without a key that is 503 by
    design, which would mark a perfectly healthy container unhealthy. Switched to `/health/live`
@@ -121,12 +121,13 @@ Every line below was run in this environment on 2026-11-25.
    API fixtures to `tests/integration/conftest.py`; the offline suite now runs in 0.35 s with no
    Redis, S3 or HTTP, and `tests/conftest.py` keeps helpers only.
 8. **`gpt-5-mini` with a key produced a confusing import error.** The registry caught
-   `ModuleNotFoundError` and reported "adapter unavailable". Now `openai_parser.py` exists with
-   `IMPLEMENTED = False`, and the registry reports "not implemented in this delivery; use pypdf
-   or gemini" whether or not a key is present. Verified with `AI_MODE=live OPENAI_API_KEY=...`.
+   `ModuleNotFoundError` and reported "adapter unavailable". At the time the fix was a declared,
+   disabled stub (`IMPLEMENTED = False`) so the API said "not implemented in this delivery".
+   **Superseded:** `gpt-5-mini` is now implemented for real — see the scorecard-remediation section
+   and `tests/unit/test_openai_parser.py`.
 9. **The API accepted jobs that could only fail.** With `AI_MODE=live` and no Gemini key, `pypdf`
    stayed enabled, so an upload returned `202` and the worker then failed it with
-   `SUMMARIZER_UNAVAILABLE` â€” a false accept, which contradicts the plan's own definition of done.
+   `SUMMARIZER_UNAVAILABLE` — a false accept, which contradicts the plan's own definition of done.
    Now `ProviderRegistry._blocking_reason()` disables **every** parser when summarization cannot
    run (a document is only complete with a summary, and the summary is Gemini-only), so the upload
    is refused with `503` and an actionable message. Verified with `.env` removed entirely.
@@ -140,14 +141,14 @@ Every line below was run in this environment on 2026-11-25.
     `GEMINI_MODEL` in the local `.env` (gitignored). Defaults keep the brief's id.
 12. **nginx pinned the API's container IP at startup (latent, not the observed 502).** A literal
     `proxy_pass http://api:8000` resolves once and caches the address. During a `--force-recreate`
-    of the api container the UI showed `502 Bad Gateway` â€” but the log proved that was simply the
+    of the api container the UI showed `502 Bad Gateway` — but the log proved that was simply the
     API being down for a few seconds, and the recreated container came back on the *same* IP
     (`172.25.0.5`), so nginx recovered by itself. The real defect is narrower: if the recreated
     container ever lands on a different IP, the UI would 502 until the frontend was restarted.
     Hardened with `resolver 127.0.0.11 valid=10s` plus a variable upstream, so the name is
     re-resolved per request. Verified by `nginx -t` and a working proxy; an attempt to force a
     different IP (disconnect/reconnect with a fixed address) left the container unattached, so
-    that path is covered by config semantics rather than by a passing experiment â€” stated plainly
+    that path is covered by config semantics rather than by a passing experiment — stated plainly
     because it is not the same thing.
 
 13. **Duplicate `tags` block in the EC2 security group.** Caught by `terraform validate` on the first
@@ -155,24 +156,24 @@ Every line below was run in this environment on 2026-11-25.
     validator runs before anything is applied. Removed the earlier assignment; the merged one with
     the `Name` tag stayed.
 14. **`gpt-5-mini` was enabled in fake mode while the README promised it never is.** The docs agent
-    caught this divergence between code and README. Fixed in code rather than in the doc: the
-    unimplemented check now runs before the fake-mode branch, so a provider with no implementation is
-    never advertised as usable, not even as a labelled stand-in. Verified: `enabled=false` with
-    "not implemented in this delivery" in live mode.
+    caught this divergence between code and README. Fixed in code rather than in the doc: at the
+    time, a provider with no implementation was never advertised as usable, not even as a labelled
+    stand-in. **Superseded:** the provider is now implemented, so it is a legitimate stand-in in fake
+    mode and a real parser in live mode with a key.
 
 15. **`S3_BUCKET` no longer reached the provisioner or the app** (regression introduced when Terraform
     replaced the hook). Two separate breaks: the provisioner was not given `TF_VAR_bucket_name`, so it
     always provisioned `documents`; and `S3_BUCKET` was missing from the api/worker shell-passthrough
     list, so a custom name was ignored by the app as well. Fixed with
     `TF_VAR_bucket_name: ${S3_BUCKET:-documents}` plus `- S3_BUCKET` on both services. Verified both
-    directions: `S3_BUCKET=pdf-docs-custom` â†’ terraform `3 added, 3 destroyed` â†’ readiness
-    `bucket 'pdf-docs-custom' ok`; revert â†’ `bucket 'documents' ok`. Consequence worth knowing: changing
+    directions: `S3_BUCKET=pdf-docs-custom` → terraform `3 added, 3 destroyed` → readiness
+    `bucket 'pdf-docs-custom' ok`; revert → `bucket 'documents' ok`. Consequence worth knowing: changing
     the name recreates the bucket, because the name is the resource identity.
 
 ### Provisioning change: the LocalStack init hook was removed
 
 The bucket used to be created by `infra/localstack/init/ready.d/10-create-bucket.sh`. Terraform now
-owns it, and the hook is gone â€” two mechanisms for one resource is how drift starts. `compose.yaml`
+owns it, and the hook is gone — two mechanisms for one resource is how drift starts. `compose.yaml`
 runs a one-shot `provisioner` service (the official Terraform image) before api/worker, and
 `api`/`worker` wait on `service_completed_successfully`. Consequence for a reviewer: the first `up`
 downloads the AWS provider (a minute or two) and needs network, in exchange for infrastructure that
@@ -182,14 +183,14 @@ is declared rather than assumed.
 `docker compose build` from this project directory kept producing an image with an **older**
 `app/providers/gemini.py`, even with `--no-cache`, while the file on disk and a bind mount both
 showed the new content. Building the same tree from a temp directory outside OneDrive produced the
-correct image (`grep -c HttpRetryOptions` â†’ 1 vs 0). So it is BuildKit snapshotting a stale context
+correct image (`grep -c HttpRetryOptions` → 1 vs 0). So it is BuildKit snapshotting a stale context
 for the OneDrive-backed path, not a defect in the repo: a fresh clone builds correctly. Workaround
 used for verification: build from a temp context, then retag the resulting image.
 
 ## Environment facts for whoever runs this next
 
 - The Docker CLI reaches the engine over the Windows named pipe `dockerDesktopLinuxEngine`.
-  Under a restricted sandbox that pipe is denied (`Access is denied`) â€” a sandbox boundary, not
+  Under a restricted sandbox that pipe is denied (`Access is denied`) — a sandbox boundary, not
   an engine fault. Subagents without pipe access cannot run or verify anything Docker-related.
 - ~~Two leftover containers from another project held host ports 5432 and 4566~~ - resolved later in
   the session: 18 stale containers were removed (volumes untouched) and the `LOCALSTACK_PORT`
@@ -200,9 +201,9 @@ used for verification: build from a temp context, then retag the resulting image
 
 ## Changelog
 
-- **2026-11-25** â€” contract frozen; four work packages fanned out; core API/worker implemented;
+- **2026-11-25** — contract frozen; four work packages fanned out; core API/worker implemented;
   compose and registry integration fixes; full verification run (27 tests + smoke); README.
-- **2026-11-25 (packaging)** â€” `.gitignore` and `.gitattributes` completed and verified with
+- **2026-11-25 (packaging)** — `.gitignore` and `.gitattributes` completed and verified with
   `git check-ignore` in a scratch repo (22 paths ignored, 15 correctly kept, 0 failures);
   a stray empty `epam-tech-assessment/app/providers/__init__.py` from a mis-joined path was
   removed. `.gitattributes` exists because CRLF conversion would silently break the LocalStack
@@ -263,7 +264,7 @@ The self-review scored the project 7/10 and named the gaps. This round closes th
 
 | Gap | Fix | Evidence |
 |---|---|---|
-| No git history, no CI, unpinned deps | `git init` + commits; `.github/workflows/ci.yml` (lint, types, encoding, unit, integration+e2e, frontend, terraform); `requirements*.lock.txt` generated with `pip freeze` and installed by the Dockerfile | CI YAML parses with 6 jobs; images build from the locks (fastapi 0.165.0, redis 6.4.0, pytest 8.4.2) |
+| No git history, no CI, unpinned deps | `git init` + commits; `.github/workflows/ci.yml` (lint, types, encoding, unit, integration+e2e, frontend, terraform); `requirements*.lock.txt` generated with `pip freeze` and installed by the Dockerfile | CI YAML parses with 5 jobs (quality, unit, integration, frontend, terraform); images build from the locks (fastapi 0.165.0, redis 6.4.0, pytest 8.4.2) |
 | GPT-5 Mini unimplemented | Real Responses-API adapter + parser, shared page splitter | 13 unit tests pin the request payload, ordering, page cap and error mapping |
 | Lease/fenced commit had no pytest coverage | `tests/integration/test_repository.py` against a real Redis | 14 passed |
 | Refresh lost every document | `docs:index` sorted set + `GET /api/v1/documents` with cursor | 3 integration tests (ordering, pagination without repeats, bounded limit) |
@@ -274,7 +275,7 @@ The self-review scored the project 7/10 and named the gaps. This round closes th
 
 Bugs found while closing the gaps:
 
-19. **`queue.pending()` crashed** (`int()` on the consumers list) â€” latent because nothing called it;
+19. **`queue.pending()` crashed** (`int()` on the consumers list) — latent because nothing called it;
     the new repository test did. Fixed and covered.
 20. **A Windows-1252 em dash corrupted two files** and made `mypy` fail with "cannot decode file".
     Repaired, and a `scripts/check_encoding.py` gate now fails CI on any non-UTF-8 text file.

@@ -1,4 +1,4 @@
-# Async PDF processing
+﻿# Async PDF processing
 
 Upload one or more PDFs, pick a parser, and read **ordered per-page content** plus **one
 document-level summary** once a background worker finishes. The HTTP API never blocks on
@@ -13,28 +13,28 @@ LocalStack S3 for source PDFs, PyPDF and Google Gemini for extraction, React UI 
 ## Architecture
 
 ```text
-                       ┌──────────────────────────────────────────────┐
-  React UI :3000 ──────▶│ nginx  /api/*  →  api:8000                    │
-  curl / Swagger  ─────▶└──────────────────────────────────────────────┘
-                                        │
-                             ┌──────────▼───────────┐
-                             │  api  (FastAPI)      │  validate → upload → enqueue
-                             │  uvicorn :8000       │  never parses, never calls AI
-                             └───────┬──────┬───────┘
-                     PUT source.pdf  │      │ MULTI: HSET job + XADD
-                                     ▼      ▼
-                        ┌──────────────┐  ┌──────────────────┐
-                        │ LocalStack   │  │ Redis 7          │
-                        │ S3 :4566     │  │ state + Stream   │
-                        └──────▲───────┘  └────────┬─────────┘
-                               │ GET source.pdf    │ XREADGROUP / XAUTOCLAIM
-                        ┌──────┴───────────────────▼─────────┐
-                        │  worker  (same image, other CMD)    │
-                        │  lease → parse → checkpoint →       │
-                        │  summarize → fenced commit → ACK    │
-                        └───────────────┬────────────────────┘
-                                        │
-                             PyPDF (local) │ Gemini (per page + summary)
+                       â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+  React UI :3000 â”€â”€â”€â”€â”€â”€â–¶â”‚ nginx  /api/*  →  api:8000                    â”‚
+  curl / Swagger  â”€â”€â”€â”€â”€â–¶â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+                                        â”‚
+                             â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â–¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+                             â”‚  api  (FastAPI)      â”‚  validate → upload → enqueue
+                             â”‚  uvicorn :8000       â”‚  never parses, never calls AI
+                             â””â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”˜
+                     PUT source.pdf  â”‚      â”‚ MULTI: HSET job + XADD
+                                     â–¼      â–¼
+                        â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+                        â”‚ LocalStack   â”‚  â”‚ Redis 7          â”‚
+                        â”‚ S3 :4566     â”‚  â”‚ state + Stream   â”‚
+                        â””â”€â”€â”€â”€â”€â”€â–²â”€â”€â”€â”€â”€â”€â”€â”˜  â””â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+                               â”‚ GET source.pdf    â”‚ XREADGROUP / XAUTOCLAIM
+                        â”Œâ”€â”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â–¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+                        â”‚  worker  (same image, other CMD)    â”‚
+                        â”‚  lease → parse → checkpoint →       â”‚
+                        â”‚  summarize → fenced commit → ACK    â”‚
+                        â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+                                        â”‚
+                             PyPDF (local) â”‚ Gemini (per page + summary)
 ```
 
 Two processes, one image. Redis is the only job state; the stream carries a `document_id`
@@ -49,12 +49,12 @@ LocalStack, and infrastructure.
 
 ```text
 infra/
-├── versions.tf              required_version + provider pin
-├── modules/
-│   └── s3/                  bucket, public-access block, versioning, optional lifecycle
-├── envs/
-│   ├── local/               same module, provider pointed at LocalStack  <- applied by compose
-│   └── prod/                real AWS: S3 + EC2 app host + IAM + Elastic IP
+â”œâ”€â”€ versions.tf              required_version + provider pin
+â”œâ”€â”€ modules/
+â”‚   â””â”€â”€ s3/                  bucket, public-access block, versioning, optional lifecycle
+â”œâ”€â”€ envs/
+â”‚   â”œâ”€â”€ local/               same module, provider pointed at LocalStack  <- applied by compose
+â”‚   â””â”€â”€ prod/                real AWS: S3 + EC2 app host + IAM + Elastic IP
 ```
 
 **What Compose does on `up`:** `localstack` → `provisioner` (init + apply + print the bucket name)
@@ -532,4 +532,4 @@ this as-is.**
 - **Single Redis instance.** The lease/commit transactions are not Redis Cluster compatible.
 - Per-page Gemini calls are slow and costly by design (deterministic page boundaries). Large
   documents belong on the PyPDF parser.
-- No auth, no quotas, no rate limiting, no orphan-reconciliation job.
+- No auth and no quotas: per-IP rate limits at the proxy and per-process upload admission are the only abuse controls. No orphan-reconciliation job.

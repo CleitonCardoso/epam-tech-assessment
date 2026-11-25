@@ -1,6 +1,7 @@
-# Runtime dependencies. Bounds are deliberate: the image is verified with `docker compose build`
-# and the resolved versions are then frozen in docs/PROGRESS.md ("dependency freeze") so a
-# reviewer gets the same tree we tested. Raise a bound only with a fresh verified build.
+# Human-edited intent. The versions that are actually installed come from requirements.lock.txt,
+# generated with `pip freeze` from the verified image and installed by the Dockerfile, so a build is
+# reproducible. To change a dependency: edit this file, rebuild, then regenerate the lock (the
+# command is in the Dockerfile comment).
 fastapi>=0.115,<1.0
 uvicorn[standard]>=0.30,<1.0
 pydantic>=2.7,<3
